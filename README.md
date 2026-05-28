@@ -4,6 +4,8 @@
 
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.35-326CE5?logo=kubernetes)](https://kubernetes.io/)
 [![AWS](https://img.shields.io/badge/AWS-EKS-FF9900?logo=amazon-aws)](https://aws.amazon.com/eks/)
+[![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A51.6-7B42BC?logo=terraform)](https://www.terraform.io/)
+[![License](https://img.shields.io/badge/License-See%20LICENSE-informational)](LICENSE)
 
 ---
 
@@ -36,25 +38,30 @@
 ```bash
 cd terraform
 
-# 1. 一次性 bootstrap state backend
+# 1. 一次性 bootstrap state backend (S3 bucket + DynamoDB lock table)
+#    bucket 名称全局唯一，建议带账号 ID 后缀；锁表默认派生为 "${bucket}-lock"。
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET="eks-tfstate-${ACCOUNT_ID}-us-west-2"
+terraform -chdir=bootstrap init
 terraform -chdir=bootstrap apply \
-  -var="bucket_name=my-eks-tfstate" -var="region=us-west-2"
+  -var="bucket_name=${BUCKET}" -var="region=us-west-2"
 
 # 2. 配置变量
 cp terraform.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars   # 填写 vpc_id / subnet_ids / cluster_name 等
 
-# 3. apply（私有集群需在堡垒机上执行）
+# 3. apply
+mv backend.tf.disabled backend.tf
 terraform init \
-  -backend-config="bucket=my-eks-tfstate" \
+  -backend-config="bucket=${BUCKET}" \
   -backend-config="key=eks-cluster-deployment/dev/terraform.tfstate" \
   -backend-config="region=us-west-2" \
-  -backend-config="dynamodb_table=my-eks-tfstate-lock"
+  -backend-config="dynamodb_table=${BUCKET}-lock"
 terraform plan
 terraform apply
 
 # 4. 验证（需要 kubectl 已配好）
-./scripts/option_inspect_eks.sh
+../scripts/option_inspect_eks.sh
 kubectl get nodes
 ```
 
@@ -75,7 +82,8 @@ kubectl get nodes
 - ✅ **自动扩缩容** - Cluster Autoscaler 自动管理节点
 - ✅ **完整 CSI 支持** - EBS/EFS/FSx/S3 存储驱动
 - ✅ **GPU 节点支持** - P5/P5en/P6/G7e 实例 + EFA 多网卡 + `vpc.amazonaws.com/efa` 设备插件
-- ✅ **EC2 拓扑感知调度** - NG 起来后按 NG 打印拓扑清单(读 cloud-controller-manager 写入的 `topology.k8s.aws/network-node-layer-N`)；workload 用 nodeAffinity 直接绑定 AWS 原生 label,挑出共享同一 bottom-layer network node 的子集 (`GPU_TOPOLOGY_MODE=inventory`)
+- ✅ **EC2 拓扑感知调度** - 按节点组打印 cloud-controller-manager 写入的 `topology.k8s.aws/network-node-layer-N` 标签
+- ✅ **同 bottom-layer 亲和** - workload 用 nodeAffinity 直接绑定 AWS 原生 label，挑出共享同一 bottom-layer network node 的子集（`GPU_TOPOLOGY_MODE=inventory`）
 
 ### 集群架构
 
@@ -229,6 +237,11 @@ aws eks describe-cluster --name ${CLUSTER_NAME} --query 'cluster.resourcesVpcCon
 # 3. 查看节点日志（通过 SSM）
 INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${CLUSTER_NAME}-eks-utils-node" --query 'Reservations[0].Instances[0].InstanceId' --output text)
 aws ssm start-session --target $INSTANCE_ID
+```
+
+进入 SSM 会话后，在节点上运行：
+
+```bash
 sudo journalctl -u kubelet -f
 ```
 
@@ -261,9 +274,14 @@ aws ec2 terminate-instances --instance-ids $(cat /tmp/eks-bastion-instance-id.tx
 
 ## 📚 文档
 
-- **[docs/DEPLOYMENT_SOP.md](docs/DEPLOYMENT_SOP.md)** - 完整部署标准操作流程（必读）
+- **[docs/README.md](docs/README.md)** - CSI Drivers 文档索引
+- **[docs/DEPLOYMENT_SOP.md](docs/DEPLOYMENT_SOP.md)** - legacy bash 部署标准操作流程
+- **[docs/MIGRATION_FROM_BASH.md](docs/MIGRATION_FROM_BASH.md)** - bash ↔ terraform 映射
 - **[docs/DESIGN.md](docs/DESIGN.md)** - Pod 磁盘配额设计方案
-- **[docs/](docs/)** - CSI Drivers 文档索引、GPU 拓扑重试方案、技术博客提纲
+- **[docs/AMI_VERSIONS.md](docs/AMI_VERSIONS.md)** - 已验证的 EKS AMI 版本
+- **[docs/COLLABORATION.md](docs/COLLABORATION.md)** - 协作指南
+- **[docs/P2_TOPOLOGY_RETRY_PLAN.md](docs/P2_TOPOLOGY_RETRY_PLAN.md)** - GPU 拓扑重试方案
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** / **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** - 贡献流程与行为准则
 
 ### 外部参考
 
@@ -280,11 +298,16 @@ aws ec2 terminate-instances --instance-ids $(cat /tmp/eks-bastion-instance-id.tx
 ```
 eks-cluster-deployment/
 ├── README.md                          # 本文档（快速入门）
+├── CLAUDE.md                          # AI 协作上下文
 ├── CONTRIBUTING.md                    # 贡献指南
+├── CODE_OF_CONDUCT.md                 # 行为准则
+├── LICENSE                            # 许可证
 ├── .env.example                       # legacy bash 环境变量模板
 │
 ├── terraform/                              # ★ 推荐路径
 │   ├── README.md / main.tf / variables.tf / outputs.tf
+│   ├── providers.tf / versions.tf / moved.tf
+│   ├── backend.tf.disabled                 # bootstrap 后改名为 backend.tf
 │   ├── terraform.tfvars.example
 │   ├── bootstrap/                          # state backend (S3+DynamoDB)
 │   ├── bootstrap-vpc/                      # 测试 VPC（可选）
@@ -325,16 +348,23 @@ eks-cluster-deployment/
     ├── DEPLOYMENT_SOP.md                   # legacy bash 部署流程
     ├── MIGRATION_FROM_BASH.md              # bash↔terraform 映射
     ├── DESIGN.md                           # 架构设计
+    ├── AMI_VERSIONS.md                     # 已验证的 EKS AMI 版本
     ├── COLLABORATION.md                    # 协作指南
-    ├── P2_TOPOLOGY_RETRY_PLAN.md           # GPU 拓扑重试方案
-    └── history/                            # 历史评审归档（本地保留，不纳入 git）
+    └── P2_TOPOLOGY_RETRY_PLAN.md           # GPU 拓扑重试方案
 ```
 
-> **Note**: 仓库未托管 VPC 资源；可使用 `terraform/bootstrap-vpc/` 生成测试 VPC，或自行准备 VPC 后再运行 terraform/legacy。
+> **Note**: 本仓库不创建生产 VPC。可使用 `terraform/bootstrap-vpc/` 临时生成测试 VPC，或自行准备 VPC 后再运行 terraform / legacy 流程。
 
 ---
 
 ## 📝 更新日志
+
+### v2.1 (2026-01-03)
+- ✅ Terraform 升为默认推荐路径，bash 部署进入 maintenance-only
+- ✅ legacy bash 脚本归档至 `scripts/legacy/`
+- ✅ 新增 GPU 节点组 / GPU stack / Karpenter terraform 模块
+- ✅ 新增 EC2 拓扑感知调度（`topology.k8s.aws/network-node-layer-N`）
+- ✅ 新增 `terraform/scripts/safe-destroy.sh`
 
 ### v2.0 (2025-12-29)
 - ✅ 重构部署流程，分离控制平面和节点组创建
@@ -349,6 +379,12 @@ eks-cluster-deployment/
 - ✅ 混合架构（Intel 系统节点）
 - ✅ Cluster Autoscaler + AWS Load Balancer Controller
 - ✅ EBS/EFS/S3 CSI Driver 支持
+
+---
+
+## 📄 License
+
+本项目采用根目录 [`LICENSE`](LICENSE) 中声明的许可证。使用、修改或分发前请阅读相应条款。
 
 ---
 
