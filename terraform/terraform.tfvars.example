@@ -1,0 +1,155 @@
+# =====================================================================
+# Required
+# =====================================================================
+cluster_name = "eks-demo-1"
+aws_region   = "us-west-2"
+vpc_id       = "vpc-xxxxxxxxxxxxxxxxx"
+
+# IMPORTANT: each subnet must be in a DIFFERENT availability zone.
+# VPC Interface Endpoints reject duplicate AZs (DuplicateSubnetsInSameZone)
+# — listing two subnets from the same AZ here makes all 13 endpoints fail
+# with one confusing error each. If you have a dedicated GPU subnet that
+# happens to share an AZ with a system subnet, don't list both here; pass
+# the GPU subnet via gpu_nodegroups[].subnet_ids instead.
+private_subnet_ids = [
+  "subnet-aaaaaaaaaaaaaaaaa", # AZ-a (system / control plane / default workers)
+  "subnet-bbbbbbbbbbbbbbbbb", # AZ-b
+  "subnet-ccccccccccccccccc", # AZ-c
+]
+
+public_subnet_ids = [
+  "subnet-pppppppppppppppppp",
+  "subnet-qqqqqqqqqqqqqqqqqq",
+  "subnet-rrrrrrrrrrrrrrrrrr",
+]
+
+# =====================================================================
+# Cluster mode
+# =====================================================================
+cluster_mode               = "private"
+# public_access_cidrs        = ["0.0.0.0/0"]
+k8s_version                = "1.35"
+service_ipv4_cidr          = "172.20.0.0/16"
+# kms_key_arn                = "arn:aws:kms:us-west-2:123456789012:key/xxxx"
+enable_deletion_protection = true
+
+vpc_endpoints_mode = "full"  # or "minimal"
+
+# =====================================================================
+# Cluster API access (private clusters only — leave empty for public)
+# =====================================================================
+# Same-VPC bastions / CI runners → reference by SG (preferred):
+# extra_api_ingress_security_group_ids = ["sg-xxxxxxxxxxxxxxxxx"]
+#
+# DX / VPN / peered VPCs / TGW callers → reference by CIDR:
+# extra_api_ingress_cidrs = ["10.100.0.0/16"]
+#
+# Both can be set together. Empty default = only cluster SG members reach API.
+
+# =====================================================================
+# IRSA opt-in (default off — this stack uses Pod Identity)
+# =====================================================================
+# Default false matches the bash flow (`withOIDC: false`) and the rest of
+# this stack — Karpenter / CA / ALB / every CSI driver use Pod Identity.
+# Enable only if external workloads need to verify cluster JWTs (GitHub
+# Actions OIDC federation, etc). PRIVATE-CLUSTER WARNING: the eks VPC
+# endpoint's private hosted zone shadows oidc.eks.<region>.amazonaws.com,
+# so opt-in callers must arrange DNS for that subdomain manually.
+# enable_irsa = false
+
+# =====================================================================
+# Extra cluster admins (for non-creator IAM roles)
+# =====================================================================
+# bootstrap_cluster_creator_admin_permissions=true automatically grants
+# admin to whoever runs `terraform apply`. List here only OTHER principals
+# that need cluster-admin RBAC — typical case: dev host applies, bastion
+# operates day-2. NEVER list the apply-time identity (it already has admin
+# and the access entry creation will collide with ResourceInUseException).
+# extra_cluster_admin_role_arns = ["arn:aws:iam::123456789012:role/eks-bastion-role"]
+
+# =====================================================================
+# System nodegroup
+# =====================================================================
+system_node_instance_type    = "m8g.xlarge"
+system_node_root_volume_size = 50
+system_node_data_volume_size = 100
+system_node_desired_capacity = 3
+system_node_min_size         = 3
+system_node_max_size         = 6
+
+# =====================================================================
+# Optional CSI drivers
+# =====================================================================
+install_efs_csi    = false
+install_fsx_csi    = false
+install_s3_csi     = false
+s3_csi_bucket_arns = []
+
+# =====================================================================
+# Optional Karpenter
+# =====================================================================
+install_karpenter = false
+# karpenter_ssh_public_key = "ssh-rsa AAAA..."
+
+# =====================================================================
+# Optional GPU nodegroups
+#
+# Each entry produces one EKS managed node group + Launch Template +
+# (optional) Placement Group. Replace the bash DEPLOY_GPU_OD/SPOT/ODCR/CB
+# toggles with explicit declarations.
+#
+# purchase_option ∈ { od, spot, odcr, cb }
+# placement_group ∈ { none, cluster }     # cluster requires a single AZ
+# capacity_reservation_id is required for odcr / cb
+# =====================================================================
+install_gpu_nodegroups = false
+
+# Pin a verified AWS EKS-NVIDIA AMI release (see docs/AMI_VERSIONS.md):
+# gpu_ami_release_version = "v20260512"
+#
+# Or override with a custom AMI baked from the EKS-NVIDIA base (corporate
+# certs / monitoring agents / preloaded images / compliance). Mutually
+# exclusive with gpu_ami_release_version. Custom AMI MUST derive from
+# amazon-eks-node-al2023-*-nvidia-*; building from plain AL2023 unsupported.
+# gpu_custom_ami_id = "ami-0123456789abcdef0"
+
+gpu_nodegroups = [
+  # On-Demand p5 across all private subnets
+  # {
+  #   gpu_type        = "p5.48xlarge"
+  #   purchase_option = "od"
+  # },
+
+  # Spot p5en, narrowed to AZ c
+  # {
+  #   gpu_type        = "p5en.48xlarge"
+  #   purchase_option = "spot"
+  #   subnet_ids      = ["subnet-ccccccccccccccccc"]
+  # },
+
+  # ODCR p6-b200 in az3 with cluster placement group
+  # {
+  #   gpu_type                = "p6-b200.48xlarge"
+  #   purchase_option         = "odcr"
+  #   suffix                  = "-1"
+  #   subnet_ids              = ["subnet-ccccccccccccccccc"]
+  #   capacity_reservation_id = "cr-xxxxxxxxxxxxxxxxx"
+  #   placement_group         = "cluster"
+  # },
+
+  # Capacity Block p5
+  # {
+  #   gpu_type                = "p5.48xlarge"
+  #   purchase_option         = "cb"
+  #   subnet_ids              = ["subnet-ccccccccccccccccc"]
+  #   capacity_reservation_id = "cr-yyyyyyyyyyyyyyyyy"
+  # },
+]
+
+# =====================================================================
+# Tagging
+# =====================================================================
+default_tags = {
+  business = "middleware"
+  resource = "eks"
+}

@@ -1,0 +1,154 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: graviton
+spec:
+  # AMI 选择器 - 使用 EKS 优化的 AL2023 ARM64 AMI
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - name: "amazon-eks-node-al2023-arm64-standard-1.35-*"
+
+  # IAM 角色
+  role: "KarpenterNodeRole-${CLUSTER_NAME}"
+
+  # 子网选择器
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "${CLUSTER_NAME}"
+
+  # 安全组选择器
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "${CLUSTER_NAME}"
+
+  # 块设备映射
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+
+    - deviceName: /dev/xvdb
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+
+  # User Data - 使用 LVM 挂载数据盘到 /var/lib/containerd
+  userData: |
+    MIME-Version: 1.0
+    Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+
+    --==BOUNDARY==
+    Content-Type: text/cloud-boothook; charset="us-ascii"
+
+    #!/bin/bash
+    # Mount data disk to /var/lib/containerd using LVM
+    set -euxo pipefail
+
+    # Stop containerd first
+    systemctl stop containerd || true
+
+    # Auto-detect EBS data disk (exclude root disk)
+    # Get root device first, then find the first non-root NVMe disk
+    ROOT_DEV="$(findmnt -no SOURCE / | sed 's/p\?[0-9]*$//' || echo /dev/nvme0n1)"
+    DISK="$(lsblk -dpno NAME,TYPE | awk -v r="$ROOT_DEV" '$2=="disk" && $1!=r {print $1; exit}' || true)"
+
+    if [ -z "$DISK" ]; then
+      echo "No data disk found, skip LVM setup"
+      systemctl start containerd
+      exit 0
+    fi
+
+    echo "Found data disk: $DISK"
+
+    # Check if LVM already configured
+    if vgs vg_data &>/dev/null; then
+      echo "LVM already configured"
+    else
+      # Install lvm2 (not installed by default on AL2023)
+      dnf install -y lvm2
+
+      # Create LVM
+      pvcreate "$DISK"
+      vgcreate vg_data "$DISK"
+      lvcreate -l 100%VG -n lv_containerd vg_data
+      mkfs.xfs /dev/vg_data/lv_containerd
+    fi
+
+    # Mount LV to temporary directory and migrate data
+    TEMP_MOUNT="/mnt/runtime/containerd"
+    mkdir -p "$TEMP_MOUNT"
+
+    echo "Mounting LV to temporary directory: $TEMP_MOUNT"
+    mount /dev/vg_data/lv_containerd "$TEMP_MOUNT"
+
+    echo "Copying containerd data (including cached images) from AMI..."
+    cp -a /var/lib/containerd/. "$TEMP_MOUNT/"
+
+    echo "Unmounting temporary directory"
+    umount "$TEMP_MOUNT"
+
+    echo "Mounting LV to final destination: /var/lib/containerd"
+    mount /dev/vg_data/lv_containerd /var/lib/containerd
+
+    # Add to fstab for persistence
+    grep -q "lv_containerd" /etc/fstab || \
+      echo "/dev/vg_data/lv_containerd /var/lib/containerd xfs defaults,nofail 0 2" >> /etc/fstab
+
+    echo "Containerd data migration completed"
+    df -h /var/lib/containerd
+
+    # Install lustre-client so pods mounting FSx Lustre via CSI work.
+    # Without this, mount.lustre fails with "Invalid argument" at PVC attach.
+    echo "Installing lustre-client (for FSx Lustre CSI)"
+    dnf install -y lustre-client 2>&1 | tail -3 || echo "WARN: lustre-client install failed"
+    modprobe lustre || true
+
+    # Start containerd with migrated data
+    systemctl start containerd
+
+    # Enable services for reboot persistence
+    systemctl enable kubelet containerd
+
+    --==BOUNDARY==
+    Content-Type: text/cloud-boothook; charset="us-ascii"
+
+    #!/bin/bash
+    # Inject SSH public key for Karpenter nodes (optional)
+    SSH_PUB_KEY="${SSH_PUBLIC_KEY}"
+    if [ -n "$SSH_PUB_KEY" ]; then
+      mkdir -p /home/ec2-user/.ssh
+      echo "$SSH_PUB_KEY" >> /home/ec2-user/.ssh/authorized_keys
+      chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+      chmod 700 /home/ec2-user/.ssh
+      chmod 600 /home/ec2-user/.ssh/authorized_keys
+      echo "SSH public key injected for ec2-user"
+    fi
+
+    --==BOUNDARY==--
+
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    # hop limit must be >= 2: Pod Identity / IRSA traffic from pods traverses
+    # the container network namespace (1 hop) before reaching IMDS.
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+
+  tags:
+    Name: "${CLUSTER_NAME}-karpenter-graviton"
+    Environment: production
+    ManagedBy: karpenter
+    Architecture: arm64
+    karpenter.sh/discovery: "${CLUSTER_NAME}"
+    business: middleware
+    resource: eks
+    bdm-rev: "2025-12-26-3"

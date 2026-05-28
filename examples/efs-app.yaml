@@ -1,0 +1,110 @@
+---
+# EFS CSI Driver Test Examples
+# Demonstrates shared filesystem across multiple pods on different nodes
+#
+# Prerequisites:
+#   1. Install EFS CSI Driver:
+#      INSTALL_DRIVERS=efs ./scripts/legacy/option_install_csi_drivers.sh
+#   2. Create EFS filesystem with mount targets in each subnet
+#   3. Replace ${EFS_ID} with your EFS filesystem ID (e.g., fs-091a3f95533e513a9)
+#
+# Quick Test:
+#   # Set variables (SYSTEM_NODE_LABEL_* come from .env; source 0_setup_env.sh first)
+#   source scripts/0_setup_env.sh
+#   export EFS_ID=fs-xxxxxxxxxxxxxxxxx
+#
+#   # Apply manifests
+#   envsubst < examples/efs-app.yaml | kubectl apply -f -
+#
+#   # Verify shared storage (pods on different nodes can read/write same file)
+#   kubectl get sc efs-sc
+#   kubectl get pvc efs-claim
+#   kubectl get pods efs-test-1 efs-test-2 -o wide
+#   kubectl logs efs-test-1
+#   kubectl logs efs-test-2
+#   kubectl exec efs-test-1 -- cat /data/shared.txt
+#
+#   # Cleanup
+#   kubectl delete pod efs-test-1 efs-test-2
+#   kubectl delete pvc efs-claim
+#   kubectl delete sc efs-sc
+
+# ============================================
+# EFS StorageClass (Dynamic Provisioning with Access Points)
+# ============================================
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: ${EFS_ID}
+  directoryPerms: "700"
+  gidRangeStart: "1000"
+  gidRangeEnd: "2000"
+volumeBindingMode: Immediate
+---
+# PersistentVolumeClaim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: efs-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 10Gi
+
+# ============================================
+# Test Pods - Verify shared storage across nodes
+# ============================================
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: efs-test-1
+spec:
+  nodeSelector:
+    ${SYSTEM_NODE_LABEL_KEY}: ${SYSTEM_NODE_LABEL_VALUE}
+  containers:
+  - name: app
+    image: public.ecr.aws/amazonlinux/amazonlinux:2023
+    command: ["/bin/sh", "-c", "echo 'Hello from Pod 1' >> /data/shared.txt && cat /data/shared.txt && sleep infinity"]
+    volumeMounts:
+    - name: efs-storage
+      mountPath: /data
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  volumes:
+  - name: efs-storage
+    persistentVolumeClaim:
+      claimName: efs-claim
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: efs-test-2
+spec:
+  nodeSelector:
+    ${SYSTEM_NODE_LABEL_KEY}: ${SYSTEM_NODE_LABEL_VALUE}
+  containers:
+  - name: app
+    image: public.ecr.aws/amazonlinux/amazonlinux:2023
+    command: ["/bin/sh", "-c", "sleep 5 && echo 'Hello from Pod 2' >> /data/shared.txt && cat /data/shared.txt && sleep infinity"]
+    volumeMounts:
+    - name: efs-storage
+      mountPath: /data
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  volumes:
+  - name: efs-storage
+    persistentVolumeClaim:
+      claimName: efs-claim

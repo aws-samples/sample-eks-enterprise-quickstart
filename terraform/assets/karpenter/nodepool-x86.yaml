@@ -1,0 +1,93 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: x86
+# -----------------------------------------------------------------------------
+# EXAMPLE ONLY — tune these requirements for your workload.
+#
+# This NodePool intentionally keeps the allowed instance set small (4-16 vCPU,
+# r-/c-/m- families on Intel/AMD x86) to show a reasonable starting point
+# that is more available than a single instance type. In production you
+# almost certainly want to:
+#   - narrow `instance-family` to just the families your workloads have been
+#     validated on (mixing c/m/r families means the selected instance's
+#     memory:cpu ratio varies a lot),
+#   - widen or narrow `instance-cpu` based on typical pod sizes,
+#   - consider enabling spot capacity by adding "spot" to `capacity-type`
+#     values if your workloads tolerate interruption,
+#   - set `limits.cpu` / `limits.memory` to match your budget and cluster
+#     headroom.
+# -----------------------------------------------------------------------------
+spec:
+  template:
+    metadata:
+      # Note: karpenter.sh/capacity-type is added automatically by Karpenter
+      # based on the actual capacity type of the launched instance. Do NOT
+      # hard-code it here — doing so would override the system label and
+      # mis-tag spot instances as on-demand if you expand capacity-type
+      # below to include "spot".
+      labels:
+        node-type: x86
+        arch: amd64
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: x86
+
+      requirements:
+        # Architecture — x86_64 only.
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Families — limited to r/c/m Intel (i) general-purpose families.
+        # Add AMD (a) families like m7a/c7a/r7a if you want a broader
+        # bin-packing surface; the memory:cpu ratio matches Intel peers.
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["r7i", "r6i", "c7i", "c6i", "m7i", "m6i"]
+
+        # vCPU band 4-16. Adjust to match typical pod resource requests.
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["4", "8", "16"]
+
+        # Nitro hypervisor only — required for EBS gp3 and modern features.
+        - key: karpenter.k8s.aws/instance-hypervisor
+          operator: In
+          values: ["nitro"]
+
+        # On-demand only. To enable spot, add "spot" below; Karpenter will
+        # prefer spot when capacity is available.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+
+      # No topology.kubernetes.io/zone constraint: Karpenter derives the
+      # allowed zones from the EC2NodeClass subnetSelectorTerms, which
+      # already follow the cluster's actual AZ layout (2/3/4 AZs). Adding
+      # a static zone list here would either ignore a 4th AZ or waste
+      # scheduling cycles on a 2-AZ cluster's missing AZ.
+
+      # Taints — not used here. If you want dedicated amd64 nodes, add a
+      # taint and matching tolerations on workloads.
+      # taints:
+      #   - key: arch
+      #     value: amd64
+      #     effect: NoSchedule
+
+  # Cluster-wide cap on this pool's total capacity. Adjust to your budget.
+  limits:
+    cpu: "1000"
+    memory: 1000Gi
+
+  # Disruption — default to empty-only consolidation. Consider switching to
+  # WhenEmptyOrUnderutilized to let Karpenter actively bin-pack.
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1h
+    budgets:
+      - nodes: "10%"
+
+  weight: 20

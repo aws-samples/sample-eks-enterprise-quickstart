@@ -1,0 +1,78 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local tool configs
+.naozhi/
+
+# Credentials and secrets
+*.pem
+*.key
+credentials.json
+# Ignore every .env variant (per-region, per-env, .local, backups, etc.)
+# and only allow the checked-in template.
+#
+# Note: this also ignores .env.local, which the Node/Next.js/Vite
+# ecosystem normally uses as a non-secret local override. This project
+# does not follow that convention — every .env.* here holds real
+# deployment identifiers (VPC IDs, cluster names, etc.) and is treated
+# as secret.
+.env
+.env.*
+!.env.example
+
+# Generated files
+eksctl_cluster_final.yaml
+eksctl_cluster_base_final.yaml
+eksctl_nodegroup_*.yaml
+terraform/assets/iam/alb-controller-iam-policy.json
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+terraform.tfvars
+terraform.tfvars.*
+# but allow the checked-in template
+!terraform.tfvars.example
+.terraform/
+.terraform.lock.hcl
+
+# AWS
+.aws/
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Logs
+*.log
+logs/
+
+# Internal validation reports and deployment snapshots (contain real
+# account IDs, VPC IDs, bastion instance IDs, etc.). Keep locally under
+# docs/history/ for reference but never commit.
+docs/history/
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+/tmp/
+*.tmp
+*-instance-id.txt
+
+# Cache and build artifacts
+node_modules/
+__pycache__/
+*.pyc
+dist/
+build/

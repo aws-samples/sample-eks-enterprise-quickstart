@@ -1,0 +1,20 @@
+# Configure remote state on S3 with DynamoDB locking.
+#
+# Bootstrap the S3 bucket and DynamoDB table once via terraform/bootstrap/
+# before running `terraform init` here.
+#
+# Override these values per-environment with:
+#   terraform init \
+#     -backend-config="bucket=my-eks-tfstate" \
+#     -backend-config="key=eks-cluster-deployment/<env>/terraform.tfstate" \
+#     -backend-config="region=us-west-2" \
+#     -backend-config="dynamodb_table=my-eks-tfstate-lock"
+terraform {
+  backend "s3" {
+    # bucket         = "<set-via-backend-config>"
+    # key            = "eks-cluster-deployment/terraform.tfstate"
+    # region         = "<set-via-backend-config>"
+    # dynamodb_table = "<set-via-backend-config>"
+    encrypt = true
+  }
+}

@@ -1,0 +1,73 @@
+# Gitleaks configuration for eks-cluster-deployment
+#
+# Extends gitleaks' default rule set (AWS keys, GitHub tokens, generic
+# high-entropy strings, etc.) with:
+#   - an allowlist for well-known public AWS constants that trigger
+#     false positives (documented ECR account IDs, placeholder account
+#     IDs used in examples);
+#   - a custom rule that blocks re-introduction of the real AWS account
+#     ID that leaked into git history before this config existed, so a
+#     future copy-paste from a running environment is rejected.
+#
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------
+# Global allowlist — suppress default-rule false positives.
+# ---------------------------------------------------------------------
+[allowlist]
+description = "Known-safe public / placeholder constants and template files"
+
+# Files that are intentionally committed with placeholder values. .env.example
+# is the canonical template; CHANGELOG is release notes (no live secrets).
+# NOTE: we intentionally do NOT blanket-exempt docs/ or examples/ — new
+# files added there should still be scanned. Add specific entries below
+# when a file is reviewed and found clean.
+paths = [
+  '''\.env\.example$''',
+  '''(^|/)CHANGELOG\.md$''',
+  '''(^|/)\.gitleaks\.toml$''',
+]
+
+# Public / placeholder constants that are not secrets:
+#   602401143452 — AWS EKS add-on ECR account (all commercial regions).
+#   961992271922 — AWS EKS add-on ECR account (China regions).
+#   123456789012 — AWS documentation placeholder account ID, used in
+#                  .env.example, examples/*.yaml, and option_install_csi_drivers.sh.
+#   public.ecr.aws/ — public ECR registry host.
+# Word boundaries (\b) ensure we only match the exact ID, not a
+# substring inside an unrelated token (e.g. a future 13-digit secret
+# that happens to contain 123456789012).
+regexes = [
+  '''\b602401143452\b''',
+  '''\b961992271922\b''',
+  '''\b123456789012\b''',
+  '''public\.ecr\.aws/''',
+]
+
+# ---------------------------------------------------------------------
+# Custom rules — hard blocks that gitleaks' defaults do not cover.
+# ---------------------------------------------------------------------
+
+# Bare 12-digit AWS account IDs are not matched by gitleaks' default
+# rule set (which keys off AKIA/ASIA prefixes). The IDs below leaked
+# into git history on earlier branches; this rule prevents a future
+# copy-paste from re-introducing them to new commits.
+[[rules]]
+id = "ecd-private-aws-account-id"
+description = "Block re-introduction of known private AWS account IDs"
+regex = '''\b788668107894\b'''
+tags = ["aws", "account-id", "private", "ecd-custom"]
+
+  # This rule would match the literal in this very file and in any
+  # archived validation reports under docs/history/ (which are
+  # .gitignore'd locally but might exist on operator machines). Allow
+  # those two paths so the rule only fires on new, unexpected occurrences.
+  [rules.allowlist]
+  description = "Allow the rule definition itself and local-only history snapshots"
+  paths = [
+    '''(^|/)\.gitleaks\.toml$''',
+    '''(^|/)docs/history/''',
+  ]

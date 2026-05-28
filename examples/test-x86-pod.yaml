@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-x86
+  namespace: default
+spec:
+  # 容忍 x86 NodePool 的 taint
+  tolerations:
+    - key: arch
+      value: amd64
+      effect: NoSchedule
+
+  # 节点亲和性 - 确保调度到 x86 节点
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-type
+                operator: In
+                values:
+                  - x86
+
+  containers:
+    - name: test
+      image: public.ecr.aws/docker/library/busybox:latest
+      command:
+        - sleep
+        - "3600"
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"

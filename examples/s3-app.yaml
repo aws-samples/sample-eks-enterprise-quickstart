@@ -1,0 +1,180 @@
+---
+# S3 CSI Driver Test Examples
+# Supports both Standard S3 and S3 Express One Zone (Directory Buckets)
+#
+# Prerequisites:
+#   1. Install S3 CSI Driver:
+#      INSTALL_DRIVERS=s3 S3_BUCKET_ARNS="arn:aws:s3:::bucket1,arn:aws:s3express:region:account:bucket/express-bucket" ./scripts/legacy/option_install_csi_drivers.sh
+#   2. Replace ${S3_BUCKET_NAME} and ${S3_EXPRESS_BUCKET_NAME} with your bucket names
+#   3. Replace ${AWS_REGION} with your region (e.g., us-east-2)
+#
+# Quick Test:
+#   # Set variables (SYSTEM_NODE_LABEL_* come from .env; source 0_setup_env.sh first)
+#   source scripts/0_setup_env.sh
+#   export S3_BUCKET_NAME=your-standard-bucket
+#   export S3_EXPRESS_BUCKET_NAME=your-bucket--use2-az1--x-s3
+#   export AWS_REGION=us-east-2
+#
+#   # Apply manifests
+#   envsubst < examples/s3-app.yaml | kubectl apply -f -
+#
+#   # Verify
+#   kubectl get pv,pvc
+#   kubectl get pods -l app=s3-app
+#   kubectl logs s3-test
+#   kubectl logs s3-express-test
+#
+#   # Cleanup
+#   kubectl delete pod s3-test s3-express-test
+#   kubectl delete pvc s3-claim s3-express-claim
+#   kubectl delete pv s3-pv s3-express-pv
+
+# ============================================
+# Example 1: Standard S3 Bucket (Static Provisioning)
+# ============================================
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: s3-csi-volume-standard
+    volumeAttributes:
+      bucketName: ${S3_BUCKET_NAME}
+      authenticationSource: driver
+  mountOptions:
+    - allow-delete
+    - region ${AWS_REGION}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s3-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: s3-pv
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: s3-test
+spec:
+  nodeSelector:
+    ${SYSTEM_NODE_LABEL_KEY}: ${SYSTEM_NODE_LABEL_VALUE}
+  containers:
+  - name: app
+    image: public.ecr.aws/amazonlinux/amazonlinux:2023
+    command: ["/bin/sh", "-c", "echo 'Hello S3 Standard' > /data/test.txt && cat /data/test.txt && ls -la /data/ && sleep infinity"]
+    volumeMounts:
+    - name: s3-storage
+      mountPath: /data
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  volumes:
+  - name: s3-storage
+    persistentVolumeClaim:
+      claimName: s3-claim
+
+# ============================================
+# Example 2: S3 Express One Zone (Directory Bucket)
+# ============================================
+# S3 Express One Zone provides single-digit millisecond latency for ML/AI workloads
+#
+# Key differences from Standard S3:
+#   - Bucket naming format: <name>--<az-id>--x-s3 (e.g., my-bucket--use2-az1--x-s3)
+#   - ARN format: arn:aws:s3express:<region>:<account>:bucket/<bucket-name>
+#   - Single AZ only (lower latency, no cross-AZ replication)
+#   - Different API endpoint: s3express-<az-id>.<region>.amazonaws.com
+#
+# Create S3 Express bucket:
+#   # Get AZ ID (not AZ name)
+#   aws ec2 describe-availability-zones --region us-east-2 \
+#     --query 'AvailabilityZones[0].ZoneId' --output text
+#   # Output: use2-az1
+#
+#   # Create directory bucket
+#   aws s3api create-bucket \
+#     --bucket myapp-express--use2-az1--x-s3 \
+#     --region us-east-2 \
+#     --create-bucket-configuration '{
+#       "Location": {"Type": "AvailabilityZone", "Name": "use2-az1"},
+#       "Bucket": {"DataRedundancy": "SingleAvailabilityZone", "Type": "Directory"}
+#     }'
+#
+# Install S3 CSI with Express bucket:
+#   INSTALL_DRIVERS=s3 S3_BUCKET_ARNS="arn:aws:s3express:us-east-2:123456789012:bucket/myapp-express--use2-az1--x-s3" \
+#     ./scripts/legacy/option_install_csi_drivers.sh
+#
+# List objects in Express bucket:
+#   aws s3api list-objects-v2 \
+#     --bucket myapp-express--use2-az1--x-s3 \
+#     --region us-east-2 \
+#     --endpoint-url https://s3express-use2-az1.us-east-2.amazonaws.com
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3-express-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: s3-csi-volume-express
+    volumeAttributes:
+      bucketName: ${S3_EXPRESS_BUCKET_NAME}
+      authenticationSource: driver
+  mountOptions:
+    - allow-delete
+    - region ${AWS_REGION}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s3-express-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: s3-express-pv
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: s3-express-test
+spec:
+  nodeSelector:
+    ${SYSTEM_NODE_LABEL_KEY}: ${SYSTEM_NODE_LABEL_VALUE}
+  containers:
+  - name: app
+    image: public.ecr.aws/amazonlinux/amazonlinux:2023
+    command: ["/bin/sh", "-c", "echo 'Hello S3 Express' > /data/test.txt && cat /data/test.txt && ls -la /data/ && sleep infinity"]
+    volumeMounts:
+    - name: s3-storage
+      mountPath: /data
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  volumes:
+  - name: s3-storage
+    persistentVolumeClaim:
+      claimName: s3-express-claim

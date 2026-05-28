@@ -1,0 +1,86 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FSxOperations",
+      "Effect": "Allow",
+      "Action": [
+        "fsx:CreateFileSystem",
+        "fsx:DeleteFileSystem",
+        "fsx:DescribeFileSystems",
+        "fsx:TagResource",
+        "fsx:UntagResource",
+        "fsx:UpdateFileSystem"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FSxBackupOperations",
+      "Effect": "Allow",
+      "Action": [
+        "fsx:CreateBackup",
+        "fsx:DeleteBackup",
+        "fsx:DescribeBackups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FSxDataRepositoryOperations",
+      "Effect": "Allow",
+      "Action": [
+        "fsx:CreateDataRepositoryTask",
+        "fsx:DescribeDataRepositoryTasks",
+        "fsx:CancelDataRepositoryTask"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2NetworkOperations",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeSubnets",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateNetworkInterfacePermission",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2TagOperations",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:*:network-interface/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": "CreateNetworkInterface"
+        }
+      }
+    },
+    {
+      "Sid": "S3DataRepositoryAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::*"
+      ],
+      "Condition": {
+        "StringLike": {
+          "s3:ResourceAccount": "${aws:PrincipalAccount}"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+---
+# gp3 - 默认 StorageClass（推荐使用）
+# 相比 gp2: 性能更好（3000 IOPS 基线）、成本更低（约 20% cheaper）
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  labels:
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/managed-by: eks-deployment
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  fsType: ext4
+  iops: "3000"              # 基线 3000 IOPS
+  throughput: "125"         # 基线 125 MB/s
+  encrypted: "true"         # 启用加密（使用默认 EBS KMS key）
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+
+---
+# io2 - 高性能存储（数据库/高 IOPS 应用）
+# 适用于: MySQL, PostgreSQL, MongoDB 等需要低延迟和高 IOPS 的应用
+# IOPS 可通过 .env 中的 IO2_IOPS 配置（范围: 100-64000）
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: io2
+  labels:
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/managed-by: eks-deployment
+provisioner: ebs.csi.aws.com
+parameters:
+  type: io2
+  fsType: ext4
+  iops: "${IO2_IOPS}"       # 由环境变量控制（默认 10000 IOPS）
+  encrypted: "true"         # 启用加密
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete

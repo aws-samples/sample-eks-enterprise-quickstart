@@ -1,0 +1,45 @@
+# pre-commit hooks for eks-cluster-deployment
+#
+# Install: pipx install pre-commit && pre-commit install
+# Run on all files: pre-commit run --all-files
+#
+# Secret scanning is enforced by gitleaks. The configuration in
+# .gitleaks.toml extends gitleaks' built-in rules with allowlists for
+# well-known AWS public constants (e.g. ECR registry account IDs) and
+# adds a custom rule that blocks re-introduction of account IDs that
+# already leaked in earlier git history.
+#
+# See CONTRIBUTING.md for why pipx is preferred over `pip install --user`.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: Detect hardcoded secrets (gitleaks)
+        description: Scan staged changes for AWS keys, tokens, and other secrets.
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+        # eksctl and kustomize templates contain unrendered ${VAR} placeholders
+        # that yaml.safe_load still parses; this guards against hard syntax errors.
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        # --severity=error: only fail the hook on real parse/syntax errors.
+        # The codebase currently has ~50 style warnings (mostly SC2155,
+        # SC2046) that would block every commit without adding real
+        # protection. Run `shellcheck --severity=warning scripts/*.sh`
+        # manually when cleaning those up.
+        args: ["--severity=error", "--external-sources"]
+        files: \.sh$

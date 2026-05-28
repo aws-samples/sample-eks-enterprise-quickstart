@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-graviton-deployment
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: test-graviton
+  template:
+    metadata:
+      labels:
+        app: test-graviton
+    spec:
+      # 容忍 Graviton NodePool 的 taint
+      tolerations:
+        - key: arch
+          value: arm64
+          effect: NoSchedule
+
+      # 节点亲和性 - 确保调度到 Graviton 节点
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - graviton
+
+      containers:
+        - name: test
+          image: public.ecr.aws/docker/library/nginx:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

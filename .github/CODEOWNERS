@@ -1,0 +1,18 @@
+# Code Owners
+# 这些用户会自动被添加为 PR 的审查者
+
+# 全局所有者
+* @KevinZhao
+
+# 脚本文件
+/scripts/ @KevinZhao
+
+# Kubernetes manifests
+/manifests/ @KevinZhao
+
+# 文档
+*.md @KevinZhao
+/docs/ @KevinZhao
+
+# GitHub 配置
+/.github/ @KevinZhao
