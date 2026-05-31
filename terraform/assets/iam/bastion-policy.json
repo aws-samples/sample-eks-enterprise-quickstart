@@ -70,7 +70,6 @@
         "iam:GetInstanceProfile",
         "iam:AddRoleToInstanceProfile",
         "iam:RemoveRoleFromInstanceProfile",
-        "iam:PassRole",
         "iam:ListInstanceProfiles",
         "iam:ListInstanceProfilesForRole",
         "iam:TagInstanceProfile",
@@ -83,6 +82,39 @@
         "iam:UpdateOpenIDConnectProviderThumbprint"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "IAMPassRoleScoped",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "eks.amazonaws.com",
+            "ec2.amazonaws.com",
+            "pods.eks.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "eks.amazonaws.com",
+            "eks-nodegroup.amazonaws.com",
+            "autoscaling.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com",
+            "spot.amazonaws.com"
+          ]
+        }
+      }
     },
     {
       "Sid": "AutoScaling",
@@ -118,9 +150,6 @@
         "logs:DescribeLogGroups",
         "logs:PutRetentionPolicy",
         "logs:DeleteRetentionPolicy",
-        "logs:TagLogGroup",
-        "logs:UntagLogGroup",
-        "logs:ListTagsLogGroup",
         "logs:ListTagsForResource",
         "logs:TagResource",
         "logs:UntagResource"
@@ -147,15 +176,12 @@
         "kms:RevokeGrant",
         "kms:ListAliases"
       ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "STSAndCallerIdentity",
-      "Effect": "Allow",
-      "Action": [
-        "sts:GetCallerIdentity"
-      ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "kms:GranteePrincipal": "eks.*amazonaws.com"
+        }
+      }
     }
   ]
 }
