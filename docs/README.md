@@ -5,6 +5,7 @@
 | 文档 | 描述 |
 |------|------|
 | [../terraform/README.md](../terraform/README.md) | **推荐路径**：terraform 部署完整流程 |
+| [BASTION_IAM_POLICY.md](BASTION_IAM_POLICY.md) | terraform 部署运行账号所需 IAM 策略与威胁模型 |
 | [MIGRATION_FROM_BASH.md](MIGRATION_FROM_BASH.md) | bash 脚本 ↔ terraform 模块映射、变量对照 |
 | [DEPLOYMENT_SOP.md](DEPLOYMENT_SOP.md) | legacy bash 部署流程（已废弃，仅供存量参考） |
 | [DESIGN.md](DESIGN.md) | 架构设计和技术决策 |
@@ -29,6 +30,7 @@
 
 | 文件 | 用途 |
 |------|------|
+| `terraform/assets/iam/bastion-policy.json` | terraform 运行账号 IAM 策略（详见 [BASTION_IAM_POLICY.md](BASTION_IAM_POLICY.md)） |
 | `terraform/assets/iam/fsx-csi-policy.json` | FSx IAM 策略模板（terraform + legacy 共用） |
 | `scripts/legacy/manifests/storage/storageclass.yaml` | StorageClass 定义（仅 legacy 用） |
 
