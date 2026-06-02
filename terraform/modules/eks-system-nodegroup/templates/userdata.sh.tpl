@@ -85,6 +85,11 @@ spec:
     apiServerEndpoint: ${cluster_endpoint}
     certificateAuthority: ${cluster_ca}
     cidr: ${service_ipv4_cidr}
+%{ if node_management == "self_managed" ~}
+  kubelet:
+    flags:
+      - "--node-labels=${node_labels}"
+%{ endif ~}
 NODECONFIG
 
 echo "NodeConfig written to /etc/eks/nodeadm.d/nodeconfig.yaml"

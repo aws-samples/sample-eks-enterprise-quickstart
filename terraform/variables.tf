@@ -115,6 +115,99 @@ variable "vpc_endpoints_mode" {
 }
 
 # =====================================================================
+# Node management mode (cluster-wide)
+# =====================================================================
+# A single switch governs both system + GPU node groups. Mixing modes
+# inside one cluster is intentionally not supported — pick one path and
+# stick with it.
+
+variable "node_management" {
+  type        = string
+  default     = "managed"
+  description = <<-EOT
+    Node group provisioning mode for BOTH system and GPU node groups
+    (mixing modes inside one cluster is not supported by this stack).
+
+      - "managed" (default): EKS Managed Node Groups (aws_eks_node_group).
+        EKS owns the underlying ASG and self-heals — terminates and
+        replaces unhealthy instances (instance IDs change), does
+        AZ-rebalancing, and handles rolling updates. cluster-autoscaler
+        discovery tags are applied to the EKS-owned ASGs via
+        aws_autoscaling_group_tag.
+
+      - "self_managed": Customer-owned ASGs (aws_autoscaling_group).
+        ASG-driven self-healing is fully OFF (suspended_processes =
+        [ReplaceUnhealthy, AZRebalance], no instance_refresh,
+        lifecycle ignore_changes on desired_capacity). Instance IDs are
+        stable until you explicitly retire them via:
+            aws autoscaling terminate-instance-in-auto-scaling-group \
+              --instance-id <id> --should-decrement-desired-capacity
+        You take ownership of K8s version upgrades (cordon → drain →
+        terminate → CA brings up replacement). cluster-autoscaler is
+        required for elastic scaling — set var.install_cluster_autoscaler
+        true (this stack installs ours) or deploy your own.
+
+    See docs/SELF_MANAGED_NG.md for the full design + operational runbook.
+  EOT
+
+  validation {
+    condition     = contains(["managed", "self_managed"], var.node_management)
+    error_message = "node_management must be 'managed' or 'self_managed'."
+  }
+}
+
+variable "asg_suspended_processes" {
+  type        = list(string)
+  default     = ["ReplaceUnhealthy", "AZRebalance"]
+  description = <<-EOT
+    ASG processes to suspend when node_management = "self_managed".
+    Default disables ALL ASG-driven self-healing (see
+    var.node_management for context). Ignored when node_management
+    = "managed".
+
+    Suspending these is rejected by validation:
+      - Launch    (Cluster Autoscaler can't scale up)
+      - Terminate (terminate-instance-in-auto-scaling-group --instance-id
+                   ... can't retire instances)
+  EOT
+
+  validation {
+    condition     = !contains(var.asg_suspended_processes, "Launch")
+    error_message = "Suspending 'Launch' breaks scale-up. Remove from list."
+  }
+
+  validation {
+    condition     = !contains(var.asg_suspended_processes, "Terminate")
+    error_message = "Suspending 'Terminate' breaks targeted retirement. Remove from list."
+  }
+}
+
+variable "extra_asg_tags" {
+  type        = map(string)
+  default     = {}
+  description = "Extra tags applied to every self-managed ASG (e.g. cost-allocation tags Owner / CostCenter / Environment). Ignored when node_management = \"managed\" — for managed NGs, attach tags via the Managed NG's API tags."
+}
+
+variable "install_cluster_autoscaler" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Whether this stack installs cluster-autoscaler. Default true installs
+    the upstream chart with Pod Identity (image + chart version
+    auto-aligned to var.k8s_version unless overridden via
+    var.cluster_autoscaler_version / var.cluster_autoscaler_chart_version).
+
+    Set false when an external CA is deployed by your team (e.g.
+    customer-supplied CA running against the same EKS cluster). The NG
+    modules continue to inline the standard
+    `k8s.io/cluster-autoscaler/<cluster>=owned` discovery tags on the
+    ASGs regardless of this flag, so any compatible CA can pick them up.
+
+    See docs/EXTERNAL_CLUSTER_AUTOSCALER.md for the cutover SOP.
+  EOT
+}
+
+# =====================================================================
 # System nodegroup
 # =====================================================================
 
@@ -176,14 +269,14 @@ variable "ec2_key_name" {
 
 variable "cluster_autoscaler_version" {
   type        = string
-  description = "Cluster Autoscaler image tag. Major.minor must match k8s_version."
-  default     = "v1.35.0"
+  description = "Cluster Autoscaler image tag (e.g. \"v1.35.0\"). Empty (default) auto-selects from the K8s-version → CA-version matrix in modules/eks-addons/main.tf. Set explicitly only when you need to override the matrix or use a vendor build. Major.minor must match k8s_version."
+  default     = ""
 }
 
 variable "cluster_autoscaler_chart_version" {
   type        = string
-  description = "kubernetes/autoscaler helm chart version (independent of image tag). Bump together with cluster_autoscaler_version when upgrading. 9.48+ ships v1.35.0 as the default image tag, matching our cluster version."
-  default     = "9.57.0"
+  description = "kubernetes/autoscaler helm chart version (e.g. \"9.48.0\"). Empty (default) auto-selects from the K8s-version → chart-version matrix in modules/eks-addons/main.tf. Bump together with cluster_autoscaler_version if you override either."
+  default     = ""
 }
 
 variable "alb_controller_chart_version" {

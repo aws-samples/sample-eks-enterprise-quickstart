@@ -84,9 +84,14 @@ variable "gpu_nodegroups" {
   }
 
   validation {
+    # Reject both "field omitted" (optional default → null) and "field
+    # set to null" for ODCR/CB. NOTE: coalesce() can't be used here —
+    # Terraform's coalesce rejects BOTH null AND "", which would throw
+    # on every spot/od entry (legitimately has no CR id). Explicit
+    # null-check is the only correct form.
     condition = alltrue([
       for ng in var.gpu_nodegroups :
-      ng.purchase_option != "odcr" && ng.purchase_option != "cb" || (try(ng.capacity_reservation_id, "") != "")
+      ng.purchase_option != "odcr" && ng.purchase_option != "cb" || (ng.capacity_reservation_id != null && ng.capacity_reservation_id != "")
     ])
     error_message = "purchase_option=odcr|cb requires capacity_reservation_id."
   }
@@ -159,3 +164,79 @@ variable "ec2_key_name" {
 # Note: helm/kubernetes resources for the K8s GPU stack
 # (nvidia-device-plugin, EFA device plugin, dcgm-exporter, etc.) live in
 # the eks-gpu-stack module. This module is now AWS-only (IAM/SG/LT/NG).
+
+variable "node_management" {
+  type        = string
+  default     = "managed"
+  description = <<-EOT
+    GPU node group provisioning mode (applies to ALL entries in
+    gpu_nodegroups — per-entry overrides are not supported).
+
+      - "managed" (default): EKS Managed Node Group (aws_eks_node_group).
+        EKS owns the underlying ASG, including self-healing (terminates +
+        replaces unhealthy instances → instance IDs change), AZ rebalancing,
+        and rolling updates. CA discovery tags are applied to the EKS-owned
+        ASGs via aws_autoscaling_group_tag.
+
+      - "self_managed": Customer-owned ASGs (aws_autoscaling_group, one per
+        gpu_nodegroups entry) with all ASG-driven self-healing disabled
+        (suspended_processes = [ReplaceUnhealthy, AZRebalance], no
+        instance_refresh, lifecycle ignore_changes on desired_capacity).
+        Instance IDs are stable until you explicitly retire them via:
+            aws autoscaling terminate-instance-in-auto-scaling-group \
+              --instance-id <id> --should-decrement-desired-capacity
+        You take ownership of K8s version upgrades (cordon → drain →
+        terminate → CA brings up replacement). cluster-autoscaler is
+        required for elastic scaling — set var.install_cluster_autoscaler
+        true (this stack installs ours) or deploy your own.
+
+    Cross-module convention: when this is "self_managed", set
+    var.node_management on eks-system-nodegroup to the same value. Mixing
+    modes inside one cluster is not supported by this stack.
+
+    See docs/SELF_MANAGED_NG.md for the full design + operational runbook.
+  EOT
+
+  validation {
+    condition     = contains(["managed", "self_managed"], var.node_management)
+    error_message = "node_management must be 'managed' or 'self_managed'."
+  }
+}
+
+variable "asg_suspended_processes" {
+  type        = list(string)
+  default     = ["ReplaceUnhealthy", "AZRebalance"]
+  description = <<-EOT
+    ASG processes to suspend when node_management = "self_managed".
+    Default disables ALL ASG-driven self-healing:
+      - ReplaceUnhealthy: prevents ASG from terminating + replacing
+        health-check-failed instances (which would change instance ID).
+      - AZRebalance: prevents ASG from terminating instances in
+        over-populated AZs.
+
+    NOT suspended (validation rejects suspending these):
+      - Launch: needed by Cluster Autoscaler to scale up.
+      - Terminate: needed by 'terminate-instance-in-auto-scaling-group
+        --instance-id ...' for targeted retirement.
+      - HealthCheck: kept enabled so unhealthy instances are still flagged
+        (visibility), they're just not auto-replaced.
+
+    Ignored when node_management = "managed".
+  EOT
+
+  validation {
+    condition     = !contains(var.asg_suspended_processes, "Launch")
+    error_message = "Suspending 'Launch' breaks scale-up (Cluster Autoscaler can't add capacity). Remove from list."
+  }
+
+  validation {
+    condition     = !contains(var.asg_suspended_processes, "Terminate")
+    error_message = "Suspending 'Terminate' breaks targeted retirement (terminate-instance-in-auto-scaling-group fails). Remove from list."
+  }
+}
+
+variable "extra_asg_tags" {
+  type        = map(string)
+  default     = {}
+  description = "Extra tags applied to every self-managed GPU ASG (e.g. cost-allocation tags Owner / CostCenter / Environment). Ignored when node_management = \"managed\" — for managed NGs, attach tags via aws_eks_node_group.tags upstream."
+}

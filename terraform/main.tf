@@ -56,6 +56,7 @@ module "eks_system_nodegroup" {
   cluster_security_group_id = module.eks_cluster.cluster_security_group_id
   service_ipv4_cidr         = module.eks_cluster.service_ipv4_cidr
   subnet_ids                = var.private_subnet_ids
+  vpc_id                    = var.vpc_id
   instance_type             = var.system_node_instance_type
   root_volume_size          = var.system_node_root_volume_size
   data_volume_size          = var.system_node_data_volume_size
@@ -66,6 +67,10 @@ module "eks_system_nodegroup" {
   node_label_value          = var.system_node_label_value
   ec2_key_name              = var.ec2_key_name
   region                    = var.aws_region
+
+  node_management         = var.node_management
+  asg_suspended_processes = var.asg_suspended_processes
+  extra_asg_tags          = var.extra_asg_tags
 
   depends_on = [module.eks_cluster]
 }
@@ -81,6 +86,7 @@ module "eks_addons" {
   vpc_id                           = var.vpc_id
   region                           = var.aws_region
   k8s_version                      = var.k8s_version
+  install_cluster_autoscaler       = var.install_cluster_autoscaler
   cluster_autoscaler_version       = var.cluster_autoscaler_version
   cluster_autoscaler_chart_version = var.cluster_autoscaler_chart_version
   alb_controller_chart_version     = var.alb_controller_chart_version
@@ -162,6 +168,10 @@ module "eks_gpu_nodegroup" {
   local_lvm_mount       = var.gpu_local_lvm_mount
   local_lvm_fs          = var.gpu_local_lvm_fs
   ec2_key_name          = var.ec2_key_name
+
+  node_management         = var.node_management
+  asg_suspended_processes = var.asg_suspended_processes
+  extra_asg_tags          = var.extra_asg_tags
 
   depends_on = [module.eks_addons]
 }
