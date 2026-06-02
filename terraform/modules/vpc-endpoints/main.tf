@@ -46,40 +46,21 @@ resource "null_resource" "verify_subnet_az_uniqueness" {
   }
 }
 
-# Security group for Interface endpoints — allows 443 from inside the VPC.
-resource "aws_security_group" "endpoints" {
-  name        = "${var.cluster_name}-vpc-endpoints-sg"
-  description = "Security group for VPC Interface endpoints"
-  vpc_id      = var.vpc_id
-
-  tags = {
-    Name = "${var.cluster_name}-vpc-endpoints-sg"
-  }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "endpoints_https" {
-  security_group_id = aws_security_group.endpoints.id
-  cidr_ipv4         = var.vpc_cidr
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  description       = "HTTPS from VPC"
-}
-
-resource "aws_vpc_security_group_egress_rule" "endpoints_all" {
-  security_group_id = aws_security_group.endpoints.id
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-  description       = "Allow all egress"
-}
-
 # ---------------------------------------------------------------------
-# Endpoint sets
+# Endpoint sets + brownfield discovery
 #
-# Required (always created): eks, eks-auth, sts, ec2 — node registration
+# Required (always wanted): eks, eks-auth, sts, ec2 — node registration
 #   and Pod Identity have no public-NAT fallback.
 # Full-only: ecr.api/dkr, logs, autoscaling, elasticloadbalancing,
 #   elasticfilesystem, ssm/ssmmessages/ec2messages — all have NAT fallback.
+#
+# Brownfield: many customers run this module against a pre-existing VPC
+# that already has a partial set of Interface / Gateway endpoints (e.g.
+# created by the network team, or carried over from a previous stack).
+# Re-creating an endpoint that already exists with private_dns_enabled =
+# true fails with "Could not enable PrivateDNS, the VPC already has an
+# endpoint with the same DNS name". We discover existing endpoints up
+# front and skip-if-present.
 # ---------------------------------------------------------------------
 locals {
   required_services = ["eks", "eks-auth", "sts", "ec2"]
@@ -95,17 +76,95 @@ locals {
     "ec2messages",
   ]
 
-  interface_services = var.endpoints_mode == "full" ? concat(local.required_services, local.full_only_services) : local.required_services
+  interface_services_wanted = toset(var.endpoints_mode == "full" ? concat(local.required_services, local.full_only_services) : local.required_services)
+
+  endpoint_prefix = "com.amazonaws.${var.region}."
+}
+
+# ---------------------------------------------------------------------
+# Brownfield discovery — does this VPC already have an endpoint for
+# each service we want?
+#
+# We use an external data source (`aws ec2 describe-vpc-endpoints`) once
+# for the whole VPC because:
+#   - data.aws_vpc_endpoint (singular) requires a filter that uniquely
+#     identifies one endpoint and throws if it matches zero or many,
+#     making it unsuitable for "is it there?" checks across many services.
+#   - the AWS Terraform provider does not expose a plural data source
+#     (aws_vpc_endpoints does not exist).
+# Output JSON is parsed into local.existing_* sets used to gate creation.
+# ---------------------------------------------------------------------
+data "external" "existing_endpoints" {
+  program = ["bash", "${path.module}/scripts/list-vpc-endpoints.sh", var.vpc_id, var.region]
+}
+
+locals {
+  # Comma-separated service shortnames of Interface endpoints already in
+  # available/pendingAcceptance state, e.g. "eks,sts,ec2".
+  _existing_interface_services_csv = data.external.existing_endpoints.result["interface_services"]
+  _existing_s3_gateway_present_str = data.external.existing_endpoints.result["s3_gateway_present"]
+
+  existing_interface_services = local._existing_interface_services_csv == "" ? toset([]) : toset(split(",", local._existing_interface_services_csv))
+  s3_gateway_exists           = local._existing_s3_gateway_present_str == "true"
+
+  # Set we still need to create.
+  interface_services_to_create = setsubtract(local.interface_services_wanted, local.existing_interface_services)
+
+  # Set we're skipping because the VPC already has them. Surfaced as an
+  # output so operators can audit at apply time.
+  interface_services_skipped = setintersection(local.interface_services_wanted, local.existing_interface_services)
+
+  s3_service_name = "com.amazonaws.${var.region}.s3"
+
+  # Whether we'll create at least one endpoint of our own. When false,
+  # we don't create the endpoint SG either (avoids an orphan SG).
+  any_interface_endpoint_to_create = length(local.interface_services_to_create) > 0
+}
+
+# Security group for Interface endpoints — only created when we're
+# actually creating at least one Interface endpoint of our own (otherwise
+# we'd leave an orphan SG behind). Existing endpoints keep whatever SG
+# they were originally created with.
+resource "aws_security_group" "endpoints" {
+  count = local.any_interface_endpoint_to_create ? 1 : 0
+
+  name        = "${var.cluster_name}-vpc-endpoints-sg"
+  description = "Security group for VPC Interface endpoints"
+  vpc_id      = var.vpc_id
+
+  tags = {
+    Name = "${var.cluster_name}-vpc-endpoints-sg"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "endpoints_https" {
+  count = local.any_interface_endpoint_to_create ? 1 : 0
+
+  security_group_id = aws_security_group.endpoints[0].id
+  cidr_ipv4         = var.vpc_cidr
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  description       = "HTTPS from VPC"
+}
+
+resource "aws_vpc_security_group_egress_rule" "endpoints_all" {
+  count = local.any_interface_endpoint_to_create ? 1 : 0
+
+  security_group_id = aws_security_group.endpoints[0].id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "Allow all egress"
 }
 
 resource "aws_vpc_endpoint" "interface" {
-  for_each = toset(local.interface_services)
+  for_each = local.interface_services_to_create
 
   vpc_id              = var.vpc_id
-  service_name        = "com.amazonaws.${var.region}.${each.key}"
+  service_name        = "${local.endpoint_prefix}${each.key}"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = var.private_subnet_ids
-  security_group_ids  = [aws_security_group.endpoints.id]
+  security_group_ids  = [aws_security_group.endpoints[0].id]
   private_dns_enabled = true
 
   tags = {
@@ -125,8 +184,10 @@ data "aws_route_tables" "private" {
 }
 
 resource "aws_vpc_endpoint" "s3_gateway" {
+  count = local.s3_gateway_exists ? 0 : 1
+
   vpc_id            = var.vpc_id
-  service_name      = "com.amazonaws.${var.region}.s3"
+  service_name      = local.s3_service_name
   vpc_endpoint_type = "Gateway"
   route_table_ids   = data.aws_route_tables.private.ids
 
