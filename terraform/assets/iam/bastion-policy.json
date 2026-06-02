@@ -121,9 +121,13 @@
       "Effect": "Allow",
       "Action": [
         "autoscaling:Describe*",
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:DeleteAutoScalingGroup",
         "autoscaling:SetDesiredCapacity",
         "autoscaling:UpdateAutoScalingGroup",
         "autoscaling:TerminateInstanceInAutoScalingGroup",
+        "autoscaling:SuspendProcesses",
+        "autoscaling:ResumeProcesses",
         "autoscaling:CreateOrUpdateTags",
         "autoscaling:DeleteTags"
       ],
