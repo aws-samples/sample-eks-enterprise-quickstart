@@ -203,7 +203,8 @@ variable "install_cluster_autoscaler" {
     `k8s.io/cluster-autoscaler/<cluster>=owned` discovery tags on the
     ASGs regardless of this flag, so any compatible CA can pick them up.
 
-    See docs/EXTERNAL_CLUSTER_AUTOSCALER.md for the cutover SOP.
+    See the "Bring-your-own Cluster Autoscaler" section of
+    docs/SELF_MANAGED_NG.md for the cutover SOP.
   EOT
 }
 
