@@ -86,7 +86,7 @@ locals {
     "1.32" = { chart = "9.45.0", image = "v1.32.0" }
     "1.33" = { chart = "9.46.6", image = "v1.33.0" }
     "1.34" = { chart = "9.47.0", image = "v1.34.0" }
-    "1.35" = { chart = "9.48.0", image = "v1.35.0" }
+    "1.35" = { chart = "9.57.0", image = "v1.35.0" }
   }
   ca_chart_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { chart = "" }).chart
   ca_image_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { image = "" }).image
