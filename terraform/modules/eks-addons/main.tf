@@ -68,8 +68,35 @@ resource "aws_eks_addon" "metrics_server" {
 
 # =====================================================================
 # Cluster Autoscaler (Pod Identity)
+#
+# Gated behind var.install_cluster_autoscaler — set false when an external
+# CA (e.g. customer-supplied) is deployed against this cluster.
+#
+# Chart + image versions auto-align to var.k8s_version via the matrix
+# below (overrideable via var.cluster_autoscaler_chart_version /
+# var.cluster_autoscaler_version when an explicit pin is needed).
 # =====================================================================
+locals {
+  # K8s version → CA chart + image version pairing. Values are pinned to
+  # known-good combos at the time of this commit; bump when a new k8s
+  # minor lands. Keep chart 9.x and image v1.X.Y aligned per the chart's
+  # README compatibility matrix.
+  cluster_autoscaler_version_map = {
+    "1.31" = { chart = "9.43.0", image = "v1.31.0" }
+    "1.32" = { chart = "9.45.0", image = "v1.32.0" }
+    "1.33" = { chart = "9.46.6", image = "v1.33.0" }
+    "1.34" = { chart = "9.47.0", image = "v1.34.0" }
+    "1.35" = { chart = "9.57.0", image = "v1.35.0" }
+  }
+  ca_chart_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { chart = "" }).chart
+  ca_image_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { image = "" }).image
+  ca_chart_version = var.cluster_autoscaler_chart_version != "" ? var.cluster_autoscaler_chart_version : local.ca_chart_default
+  ca_image_version = var.cluster_autoscaler_version != "" ? var.cluster_autoscaler_version : local.ca_image_default
+}
+
 resource "aws_iam_role" "cluster_autoscaler" {
+  count = var.install_cluster_autoscaler ? 1 : 0
+
   name = "${var.cluster_name}-cluster-autoscaler"
 
   assume_role_policy = jsonencode({
@@ -83,8 +110,10 @@ resource "aws_iam_role" "cluster_autoscaler" {
 }
 
 resource "aws_iam_role_policy" "cluster_autoscaler" {
+  count = var.install_cluster_autoscaler ? 1 : 0
+
   name = "ClusterAutoscalerPolicy"
-  role = aws_iam_role.cluster_autoscaler.id
+  role = aws_iam_role.cluster_autoscaler[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -123,6 +152,8 @@ resource "aws_iam_role_policy" "cluster_autoscaler" {
 }
 
 resource "kubernetes_service_account_v1" "cluster_autoscaler" {
+  count = var.install_cluster_autoscaler ? 1 : 0
+
   metadata {
     name      = "cluster-autoscaler"
     namespace = "kube-system"
@@ -133,21 +164,25 @@ resource "kubernetes_service_account_v1" "cluster_autoscaler" {
 }
 
 resource "aws_eks_pod_identity_association" "cluster_autoscaler" {
+  count = var.install_cluster_autoscaler ? 1 : 0
+
   cluster_name    = var.cluster_name
   namespace       = "kube-system"
   service_account = "cluster-autoscaler"
-  role_arn        = aws_iam_role.cluster_autoscaler.arn
+  role_arn        = aws_iam_role.cluster_autoscaler[0].arn
 
   depends_on = [kubernetes_service_account_v1.cluster_autoscaler]
 }
 
 resource "helm_release" "cluster_autoscaler" {
+  count = var.install_cluster_autoscaler ? 1 : 0
+
   name             = "cluster-autoscaler"
   repository       = "https://kubernetes.github.io/autoscaler"
   chart            = "cluster-autoscaler"
   namespace        = "kube-system"
   create_namespace = false
-  version          = var.cluster_autoscaler_chart_version
+  version          = local.ca_chart_version
 
   # Match the resilience semantics of the karpenter helm release: roll back
   # partial installs (cleanup_on_fail) and optionally take over stale
@@ -165,12 +200,12 @@ resource "helm_release" "cluster_autoscaler" {
     }
     awsRegion = var.region
     image = {
-      tag = var.cluster_autoscaler_version
+      tag = local.ca_image_version
     }
     rbac = {
       serviceAccount = {
         create = false
-        name   = kubernetes_service_account_v1.cluster_autoscaler.metadata[0].name
+        name   = kubernetes_service_account_v1.cluster_autoscaler[0].metadata[0].name
       }
     }
     replicaCount = 2

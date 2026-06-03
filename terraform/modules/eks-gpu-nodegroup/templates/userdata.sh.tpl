@@ -168,9 +168,40 @@ modprobe lustre || true
 echo "=== Starting EKS Node Bootstrap ==="
 
 NODE_LABEL_FLAGS=""
+NODE_TAINT_FLAGS=""
+LOCAL_SSD_LABELS=""
 if [ "$${LOCAL_SSD_TOTAL_GB}" -gt 0 ]; then
-  NODE_LABEL_FLAGS="--node-labels=local-ssd=true,local-ssd-size-gb=$${LOCAL_SSD_TOTAL_GB}"
+  LOCAL_SSD_LABELS="local-ssd=true,local-ssd-size-gb=$${LOCAL_SSD_TOTAL_GB}"
 fi
+
+%{ if node_management == "self_managed" ~}
+# Self-managed mode: EKS no longer injects the labels/taints that the EKS
+# Managed Node Group API used to. Embed them in the kubelet command line
+# via NodeConfig.spec.kubelet.flags. Combine the GPU-NG-specific labels
+# (passed in from terraform) with any local-SSD labels detected above.
+EXTRA_LABELS="${extra_node_labels}"
+COMBINED_LABELS="$${EXTRA_LABELS}"
+if [ -n "$${LOCAL_SSD_LABELS}" ]; then
+  if [ -n "$${COMBINED_LABELS}" ]; then
+    COMBINED_LABELS="$${COMBINED_LABELS},$${LOCAL_SSD_LABELS}"
+  else
+    COMBINED_LABELS="$${LOCAL_SSD_LABELS}"
+  fi
+fi
+if [ -n "$${COMBINED_LABELS}" ]; then
+  NODE_LABEL_FLAGS="--node-labels=$${COMBINED_LABELS}"
+fi
+%{ if node_taints != "" ~}
+NODE_TAINT_FLAGS="--register-with-taints=${node_taints}"
+%{ endif ~}
+%{ else ~}
+# Managed mode: EKS injects workload-type / gpu-instance-type / purchase-option
+# labels and the nvidia.com/gpu taint via the NodeGroup API. We only need to
+# write LOCAL_SSD-related labels here (everything else comes from EKS).
+if [ -n "$${LOCAL_SSD_LABELS}" ]; then
+  NODE_LABEL_FLAGS="--node-labels=$${LOCAL_SSD_LABELS}"
+fi
+%{ endif ~}
 
 # ============================================================
 # NodeConfig — pin SystemdCgroup=true via NodeConfig.containerd.config
@@ -208,10 +239,15 @@ mkdir -p /etc/eks/nodeadm.d
   echo "    apiServerEndpoint: ${cluster_endpoint}"
   echo "    certificateAuthority: ${cluster_ca}"
   echo "    cidr: ${service_ipv4_cidr}"
-  if [ -n "$${NODE_LABEL_FLAGS}" ]; then
+  if [ -n "$${NODE_LABEL_FLAGS}" ] || [ -n "$${NODE_TAINT_FLAGS}" ]; then
     echo "  kubelet:"
     echo "    flags:"
-    echo "      - \"$${NODE_LABEL_FLAGS}\""
+    if [ -n "$${NODE_LABEL_FLAGS}" ]; then
+      echo "      - \"$${NODE_LABEL_FLAGS}\""
+    fi
+    if [ -n "$${NODE_TAINT_FLAGS}" ]; then
+      echo "      - \"$${NODE_TAINT_FLAGS}\""
+    fi
   fi
   echo "  containerd:"
   echo "    config: |"

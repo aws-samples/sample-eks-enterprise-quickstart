@@ -36,6 +36,44 @@ enable_deletion_protection = true
 vpc_endpoints_mode = "full"  # or "minimal"
 
 # =====================================================================
+# Node management mode (cluster-wide, applies to both system + GPU NGs)
+# =====================================================================
+# Default = "managed" — EKS Managed Node Groups, EKS owns the underlying
+# ASG including self-healing (terminate + replace unhealthy → instance ID
+# changes), AZ rebalancing, rolling updates. Standard upstream behavior.
+#
+# Set to "self_managed" when you need stable instance IDs and manual
+# lifecycle control (e.g. customer CMDB tracks instances by ID, ops team
+# wants to pick which exact instance to retire). In that mode:
+#   - ASG self-healing is fully OFF (suspended_processes =
+#     [ReplaceUnhealthy, AZRebalance], no instance_refresh)
+#   - You retire instances by id:
+#       aws autoscaling terminate-instance-in-auto-scaling-group \
+#         --instance-id <id> --should-decrement-desired-capacity
+#   - You take ownership of K8s upgrades (cordon/drain/terminate flow).
+#   - cluster-autoscaler is REQUIRED for elastic scaling — keep
+#     install_cluster_autoscaler = true (this stack installs ours), or
+#     flip to false and bring your own CA. ASG CA-discovery tags are
+#     present in either mode.
+#
+# Mixing modes inside one cluster is intentionally not supported.
+# See docs/SELF_MANAGED_NG.md for the full design + runbook.
+# node_management = "managed"
+# asg_suspended_processes = ["ReplaceUnhealthy", "AZRebalance"]   # only used in self_managed
+# extra_asg_tags = { Owner = "ml-platform", CostCenter = "1234" } # only used in self_managed
+
+# =====================================================================
+# Cluster Autoscaler installation
+# =====================================================================
+# Default = true: install our CA via Pod Identity, image + chart auto-
+# aligned to k8s_version. Set false to skip — the ASG discovery tags are
+# inlined regardless, so an external/customer-supplied CA can pick up
+# the same ASGs zero-config.
+# install_cluster_autoscaler = true
+# cluster_autoscaler_version       = ""    # empty = auto from k8s_version → CA matrix
+# cluster_autoscaler_chart_version = ""    # empty = auto from k8s_version → chart matrix
+
+# =====================================================================
 # Cluster API access (private clusters only — leave empty for public)
 # =====================================================================
 # Same-VPC bastions / CI runners → reference by SG (preferred):
