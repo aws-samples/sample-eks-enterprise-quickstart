@@ -72,10 +72,17 @@ echo "=== Installing Lustre client (for FSx Lustre CSI) ==="
 dnf install -y lustre-client 2>&1 | tail -5 || echo "WARN: lustre-client install failed"
 modprobe lustre || true
 
-echo "=== Starting EKS Node Bootstrap ==="
+echo "=== boothook complete; NodeConfig is delivered as a separate node.eks.aws MIME part ==="
 
-mkdir -p /etc/eks/nodeadm.d
-cat > /etc/eks/nodeadm.d/nodeconfig.yaml <<NODECONFIG
+--==BOUNDARY==
+Content-Type: application/node.eks.aws
+
+# AL2023 EKS bootstrap. nodeadm-config.service (shipped in the AMI) parses
+# THIS part from user-data, writes /run/eks/nodeadm/config.json, then
+# nodeadm-run.service starts kubelet. Do NOT hand-write NodeConfig + call
+# `nodeadm init` in the boothook: nodeadm-config.service runs before
+# cloud-init boothooks, fails with "no config in chain", and that failure
+# hard-blocks nodeadm-run (Requires=) so kubelet never starts.
 ---
 apiVersion: node.eks.aws/v1alpha1
 kind: NodeConfig
@@ -90,17 +97,5 @@ spec:
     flags:
       - "--node-labels=${node_labels}"
 %{ endif ~}
-NODECONFIG
-
-echo "NodeConfig written to /etc/eks/nodeadm.d/nodeconfig.yaml"
-cat /etc/eks/nodeadm.d/nodeconfig.yaml
-
-echo "Running nodeadm init..."
-nodeadm init --config-source file:///etc/eks/nodeadm.d/nodeconfig.yaml
-
-echo "Enabling kubelet and containerd services..."
-systemctl enable kubelet containerd
-
-echo "=== EKS Node Bootstrap Complete ==="
 
 --==BOUNDARY==--
