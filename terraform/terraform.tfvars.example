@@ -38,11 +38,13 @@ vpc_endpoints_mode = "full"  # or "minimal"
 # =====================================================================
 # Node management mode (cluster-wide, applies to both system + GPU NGs)
 # =====================================================================
-# Default = "managed" — EKS Managed Node Groups, EKS owns the underlying
-# ASG including self-healing (terminate + replace unhealthy → instance ID
-# changes), AZ rebalancing, rolling updates. Standard upstream behavior.
+# This example defaults to "self_managed" (set below). The underlying
+# Terraform variable default is still "managed" — EKS Managed Node Groups,
+# EKS owns the underlying ASG including self-healing (terminate + replace
+# unhealthy → instance ID changes), AZ rebalancing, rolling updates. To use
+# that standard upstream behavior, set node_management = "managed" below.
 #
-# Set to "self_managed" when you need stable instance IDs and manual
+# "self_managed" mode is for when you need stable instance IDs and manual
 # lifecycle control (e.g. customer CMDB tracks instances by ID, ops team
 # wants to pick which exact instance to retire). In that mode:
 #   - ASG self-healing is fully OFF (suspended_processes =
@@ -58,8 +60,8 @@ vpc_endpoints_mode = "full"  # or "minimal"
 #
 # Mixing modes inside one cluster is intentionally not supported.
 # See docs/SELF_MANAGED_NG.md for the full design + runbook.
-# node_management = "managed"
-# asg_suspended_processes = ["ReplaceUnhealthy", "AZRebalance"]   # only used in self_managed
+node_management = "self_managed"
+# asg_suspended_processes = ["ReplaceUnhealthy", "AZRebalance"]   # only used in self_managed (this is the default)
 # extra_asg_tags = { Owner = "ml-platform", CostCenter = "1234" } # only used in self_managed
 
 # =====================================================================
