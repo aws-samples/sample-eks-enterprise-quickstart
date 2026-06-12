@@ -55,7 +55,6 @@ echo "=== LVM Setup Complete ==="
 # ============================================================
 # Local Instance Store LVM (ephemeral scratch)
 # ============================================================
-LOCAL_SSD_TOTAL_GB=0
 %{ if enable_local_lvm }
 echo "=== Setting up Local Instance Store LVM ==="
 
@@ -150,11 +149,6 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now setup-local-lvm.service
 
-if [ -b "/dev/${local_lvm_vg_name}/${local_lvm_lv_name}" ]; then
-  LOCAL_SSD_TOTAL_BYTES=$(blockdev --getsize64 "/dev/${local_lvm_vg_name}/${local_lvm_lv_name}" 2>/dev/null || echo 0)
-  LOCAL_SSD_TOTAL_GB=$(( LOCAL_SSD_TOTAL_BYTES / 1024 / 1024 / 1024 ))
-fi
-echo "Local SSD total: $${LOCAL_SSD_TOTAL_GB} GB"
 echo "=== Local Instance Store LVM Setup Complete ==="
 %{ else }
 echo "Local Instance Store LVM disabled"
@@ -165,119 +159,35 @@ echo "=== Installing Lustre Client ==="
 dnf install -y lustre-client
 modprobe lustre || true
 
-echo "=== Starting EKS Node Bootstrap ==="
-
-NODE_LABEL_FLAGS=""
-NODE_TAINT_FLAGS=""
-LOCAL_SSD_LABELS=""
-if [ "$${LOCAL_SSD_TOTAL_GB}" -gt 0 ]; then
-  LOCAL_SSD_LABELS="local-ssd=true,local-ssd-size-gb=$${LOCAL_SSD_TOTAL_GB}"
-fi
-
-%{ if node_management == "self_managed" ~}
-# Self-managed mode: EKS no longer injects the labels/taints that the EKS
-# Managed Node Group API used to. Embed them in the kubelet command line
-# via NodeConfig.spec.kubelet.flags. Combine the GPU-NG-specific labels
-# (passed in from terraform) with any local-SSD labels detected above.
-EXTRA_LABELS="${extra_node_labels}"
-COMBINED_LABELS="$${EXTRA_LABELS}"
-if [ -n "$${LOCAL_SSD_LABELS}" ]; then
-  if [ -n "$${COMBINED_LABELS}" ]; then
-    COMBINED_LABELS="$${COMBINED_LABELS},$${LOCAL_SSD_LABELS}"
-  else
-    COMBINED_LABELS="$${LOCAL_SSD_LABELS}"
-  fi
-fi
-if [ -n "$${COMBINED_LABELS}" ]; then
-  NODE_LABEL_FLAGS="--node-labels=$${COMBINED_LABELS}"
-fi
-%{ if node_taints != "" ~}
-NODE_TAINT_FLAGS="--register-with-taints=${node_taints}"
-%{ endif ~}
-%{ else ~}
-# Managed mode: EKS injects workload-type / gpu-instance-type / purchase-option
-# labels and the nvidia.com/gpu taint via the NodeGroup API. We only need to
-# write LOCAL_SSD-related labels here (everything else comes from EKS).
-if [ -n "$${LOCAL_SSD_LABELS}" ]; then
-  NODE_LABEL_FLAGS="--node-labels=$${LOCAL_SSD_LABELS}"
-fi
-%{ endif ~}
+echo "=== boothook complete; NodeConfig is delivered as a separate node.eks.aws MIME part ==="
 
 # ============================================================
-# NodeConfig — pin SystemdCgroup=true via NodeConfig.containerd.config
+# Force containerd + kubelet to reload config (SystemdCgroup=true)
 # ============================================================
-# Background: nodeadm's containerd config template (config2.template.toml)
-# DOES set SystemdCgroup=true in [runtimes.<RuntimeName>.options], but the
-# NVIDIA AMI's bootstrap path runs `nvidia-ctk runtime configure` afterwards
-# which has been observed (on toolkit 1.19) to drop SystemdCgroup back to
-# its default (false). Result on workload pods:
-#   FailedCreatePodSandBox: expected cgroupsPath to be of format
-#   "slice:prefix:name" for systemd cgroups
-# because kubelet (systemd cgroup driver) and runc (cgroupfs) disagree.
-#
-# Fix: supply SystemdCgroup=true via NodeConfig's containerd.config. nodeadm
-# merges this LAST, after both its own template and any nvidia-ctk overlay,
-# so the final on-disk config always carries SystemdCgroup=true.
-#
-# We deliberately DO NOT touch:
-#   - nvidia-container-runtime mode      → let toolkit 1.19's default jit-cdi
-#                                          handle device injection
-#   - enable_cdi flag in containerd      → AMI default for k8s 1.32+ is true
-#                                          (eks-ami PR #2173) and required by
-#                                          jit-cdi
-#   - accept-nvidia-visible-devices-*    → not needed in jit-cdi path
-# Earlier revisions of this file forced legacy mode + envvar workarounds,
-# which actively BROKE workload pod driver injection on toolkit 1.19+.
-mkdir -p /etc/eks/nodeadm.d
-{
-  echo "---"
-  echo "apiVersion: node.eks.aws/v1alpha1"
-  echo "kind: NodeConfig"
-  echo "spec:"
-  echo "  cluster:"
-  echo "    name: ${cluster_name}"
-  echo "    apiServerEndpoint: ${cluster_endpoint}"
-  echo "    certificateAuthority: ${cluster_ca}"
-  echo "    cidr: ${service_ipv4_cidr}"
-  if [ -n "$${NODE_LABEL_FLAGS}" ] || [ -n "$${NODE_TAINT_FLAGS}" ]; then
-    echo "  kubelet:"
-    echo "    flags:"
-    if [ -n "$${NODE_LABEL_FLAGS}" ]; then
-      echo "      - \"$${NODE_LABEL_FLAGS}\""
-    fi
-    if [ -n "$${NODE_TAINT_FLAGS}" ]; then
-      echo "      - \"$${NODE_TAINT_FLAGS}\""
-    fi
-  fi
-  echo "  containerd:"
-  echo "    config: |"
-  echo "      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia.options]"
-  echo "      SystemdCgroup = true"
-} > /etc/eks/nodeadm.d/nodeconfig.yaml
-
-echo "NodeConfig written"
-cat /etc/eks/nodeadm.d/nodeconfig.yaml
-
-nodeadm init --config-source file:///etc/eks/nodeadm.d/nodeconfig.yaml
-
-# ============================================================
-# Force containerd + kubelet to reload config
-# ============================================================
-# nodeadm's EnsureRunning() uses systemd StartUnit which is a no-op when
-# containerd is already running (enabled at boot). The freshly-written
-# /etc/containerd/config.toml — including the NodeConfig.containerd.config
-# overlay above (SystemdCgroup=true) — therefore never gets loaded; the
-# in-memory config remains the boot-time default with SystemdCgroup unset.
-# Symptom: pod sandboxes are created with cgroupfs-format cgroupsPath and
-# fail with:
-#   runc create failed: expected cgroupsPath to be of format
-#   "slice:prefix:name" for systemd cgroups
+# NodeConfig (including the containerd.config overlay that pins
+# SystemdCgroup=true) is parsed by the AMI's nodeadm-config.service from the
+# application/node.eks.aws MIME part below, BEFORE this boothook runs (the
+# systemd unit fires at ~t=5s, cloud-init boothooks at ~t=6s). nodeadm writes
+# /etc/containerd/config.toml but its EnsureRunning() uses systemd StartUnit,
+# a no-op when containerd is already running (enabled at boot) — so the fresh
+# config (SystemdCgroup=true) is on disk but never loaded into the running
+# daemon. Background: nodeadm's template DOES set SystemdCgroup=true, but the
+# NVIDIA AMI runs `nvidia-ctk runtime configure` afterwards which (on toolkit
+# 1.19) drops it back to false; our overlay merges last so the on-disk config
+# is correct. Symptom if not reloaded — workload pods fail with:
+#   FailedCreatePodSandBox / runc create failed: expected cgroupsPath to be of
+#   format "slice:prefix:name" for systemd cgroups
+# because kubelet (systemd driver) and runc (cgroupfs) disagree.
 #
 # Fix landed upstream as awslabs/amazon-eks-ami#2705 (StartDaemon →
-# RestartDaemon) but the patched nodeadm only ships in AMIs released
-# after 2026-05-13. Until our pinned AMI carries the fix, force the
-# reload here. kubelet must follow because its CRI runtime info is
-# cached and would otherwise stay tied to the old containerd PID.
+# RestartDaemon) but only ships in AMIs released after 2026-05-13. Until our
+# pinned AMI carries the fix, force the reload here. kubelet must follow
+# because its CRI runtime info is cached and would otherwise stay tied to the
+# old containerd PID.
+#
+# We deliberately DO NOT touch nvidia-container-runtime mode / enable_cdi /
+# accept-nvidia-visible-devices — toolkit 1.19's jit-cdi default handles
+# device injection; forcing legacy mode BREAKS workload pod driver injection.
 systemctl restart containerd
 systemctl restart kubelet
 
@@ -304,8 +214,50 @@ if [ ! -x /opt/amazon/efa/bin/fi_info ]; then
 fi
 %{ endif }
 
-systemctl enable kubelet containerd
-
 echo "=== GPU Node Bootstrap Complete ==="
+
+--==BOUNDARY==
+Content-Type: application/node.eks.aws
+
+# AL2023 EKS bootstrap. nodeadm-config.service (shipped in the AMI) parses
+# THIS part from user-data, writes /run/eks/nodeadm/config.json, then
+# nodeadm-run.service starts kubelet. Do NOT hand-write NodeConfig + call
+# `nodeadm init` in the boothook: nodeadm-config.service runs before
+# cloud-init boothooks, fails with "no config in chain", and that failure
+# hard-blocks nodeadm-run (Requires=) so kubelet never starts.
+#
+# SystemdCgroup=true is pinned via containerd.config (nodeadm merges it LAST,
+# after its own template and the NVIDIA AMI's nvidia-ctk overlay). The
+# boothook above force-restarts containerd+kubelet so this on-disk config is
+# actually loaded into the running daemon.
+%{ if node_management == "self_managed" ~}
+# self_managed: EKS no longer injects labels/taints via the NodeGroup API, so
+# embed them in kubelet flags here. (managed mode omits this block — EKS
+# injects workload-type / gpu-instance-type / purchase-option + the
+# nvidia.com/gpu taint itself.)
+%{ endif ~}
+---
+apiVersion: node.eks.aws/v1alpha1
+kind: NodeConfig
+spec:
+  cluster:
+    name: ${cluster_name}
+    apiServerEndpoint: ${cluster_endpoint}
+    certificateAuthority: ${cluster_ca}
+    cidr: ${service_ipv4_cidr}
+%{ if node_management == "self_managed" ~}
+  kubelet:
+    flags:
+%{ if extra_node_labels != "" ~}
+      - "--node-labels=${extra_node_labels}"
+%{ endif ~}
+%{ if node_taints != "" ~}
+      - "--register-with-taints=${node_taints}"
+%{ endif ~}
+%{ endif ~}
+  containerd:
+    config: |
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia.options]
+      SystemdCgroup = true
 
 --==BOUNDARY==--
