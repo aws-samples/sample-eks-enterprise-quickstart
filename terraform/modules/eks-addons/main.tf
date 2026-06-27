@@ -42,6 +42,13 @@ resource "aws_eks_addon" "coredns" {
 }
 
 resource "aws_eks_addon" "metrics_server" {
+  # NOTE: this addon creates a Service. The ALB controller's Service
+  # mutating webhook (failurePolicy=Fail) can reject that creation during a
+  # first apply, surfacing as
+  #   AdmissionRequestDenied ... no endpoints available for service
+  #   "aws-load-balancer-webhook-service"
+  # We fix the ordering at the source by installing the ALB controller last
+  # — see the depends_on comment on helm_release.alb_controller below.
   cluster_name                = var.cluster_name
   addon_name                  = "metrics-server"
   addon_version               = data.aws_eks_addon_version.metrics_server.version
@@ -362,5 +369,32 @@ resource "helm_release" "alb_controller" {
     }
   })]
 
-  depends_on = [aws_eks_pod_identity_association.alb_controller]
+  # Install the ALB controller LAST among the components this module lands.
+  #
+  # Once running, it registers a mutating webhook (mservice.elbv2.k8s.aws,
+  # failurePolicy=Fail) that intercepts the creation of EVERY Service in the
+  # cluster. helm's wait=true returns when the Deployment is Available, but
+  # the webhook Service's endpoints register a few seconds later — so there
+  # is a window where the webhook is wired up but has no backend ready, and
+  # any Service creation in it fails with:
+  #   AdmissionRequestDenied ... no endpoints available for service
+  #   "aws-load-balancer-webhook-service"
+  #
+  # Rather than racing that window per-victim (metrics-server, coredns, the
+  # cluster-autoscaler chart all create Services), we close it at the source:
+  # gate the controller install behind everything in this module that
+  # creates a Service, so by the time the webhook exists there are no more
+  # in-module Service creations for it to reject. Components in LATER modules
+  # (CSI drivers, Karpenter) are safe — the endpoints are long-ready by then.
+  #
+  # The CA resources are count-gated on var.install_cluster_autoscaler;
+  # referenced here without an index so depends_on resolves to an empty
+  # set (no dependency) when count=0 and to the instance when count=1.
+  depends_on = [
+    aws_eks_pod_identity_association.alb_controller,
+    aws_eks_addon.coredns,
+    aws_eks_addon.metrics_server,
+    helm_release.cluster_autoscaler,
+    kubernetes_service_account_v1.cluster_autoscaler,
+  ]
 }
