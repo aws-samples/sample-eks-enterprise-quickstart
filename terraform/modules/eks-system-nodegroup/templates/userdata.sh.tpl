@@ -13,7 +13,32 @@ exec 2>&1
 
 echo "=== Starting LVM Setup ==="
 
-systemctl stop containerd || true
+# containerd MUST start exactly once, on the final LV. The AMI's containerd
+# starts on the root volume at boot; the previous flow stopped it (without
+# waiting for boltdb to flush), rsynced a moving content store with errors
+# swallowed (|| true), umounted without sync, then started it again. That race
+# left metadata.db referencing blobs whose files never landed on EBS -> a
+# minority of nodes hit "blob not found" / ImagePullBackOff. Mask containerd up
+# front so it never starts on the root volume, migrate fail-fast + synced, then
+# unmask so nodeadm-run.service starts it once on /var/lib/containerd (the LV).
+echo "Masking containerd to prevent premature start on the root volume..."
+systemctl stop containerd 2>/dev/null || true
+systemctl mask containerd
+# Safety net: under `set -e`, ANY failure between here and the explicit unmask
+# below would otherwise leave containerd masked (a symlink to /dev/null) — and
+# a masked unit can't be started, so nodeadm-run.service's EnsureRunning fails
+# and the node never joins. This EXIT trap guarantees containerd is unmasked no
+# matter where the script aborts. (The explicit unmask on the happy path is
+# kept; this is idempotent belt-and-suspenders.)
+trap 'systemctl unmask containerd 2>/dev/null || true' EXIT
+
+# Wait for containerd to actually exit before touching its data dir.
+for i in $(seq 1 30); do
+  pgrep -x containerd >/dev/null || { echo "containerd fully stopped"; break; }
+  echo "Waiting for containerd to stop... ($i/30)"
+  sleep 1
+done
+sync
 
 ${ebs_data_disk_detect_snippet}
 
@@ -22,15 +47,16 @@ DISK=$(detect_ebs_data_disk 60) || {
   echo "ERROR: No EBS data disk found after 60 seconds"
   echo "Available disks:"
   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL
+  # Unmask so the node can still join (containerd runs on the root volume).
+  systemctl unmask containerd
   systemctl start containerd
   exit 1
 }
 echo "Found EBS data disk: $DISK"
 
 if vgs vg_data &>/dev/null; then
-  echo "LVM already configured, mounting..."
+  echo "LVM already configured (reboot scenario), mounting..."
   mount /dev/vg_data/lv_containerd /var/lib/containerd || true
-  systemctl start containerd
 else
   echo "Installing lvm2 and rsync..."
   dnf install -y lvm2 rsync
@@ -45,8 +71,21 @@ else
   mkdir -p /mnt/runtime/containerd
   mount /dev/vg_data/lv_containerd /mnt/runtime/containerd
 
+  # fail-fast: a partial copy must NOT survive. --delete keeps the target
+  # clean; on ANY rsync error we wipe the target and let containerd start from
+  # an empty store (images are re-pulled at runtime) rather than from a corrupt
+  # one. No more "|| true" silently keeping a half-copied content store.
   echo "Copying containerd data (including pre-cached pause image) from AMI..."
-  rsync -aHAX /var/lib/containerd/ /mnt/runtime/containerd/ || true
+  if ! rsync -aHAX --delete /var/lib/containerd/ /mnt/runtime/containerd/; then
+    echo "ERROR: rsync failed; wiping target to avoid a partial/corrupt content store"
+    rm -rf /mnt/runtime/containerd/* /mnt/runtime/containerd/.[!.]* 2>/dev/null || true
+  fi
+
+  # Force blob data onto EBS before swapping the mount (XFS may have committed
+  # metadata while blob file data is still in page cache).
+  echo "Syncing migrated data to disk..."
+  sync
+  sleep 2
 
   echo "Unmounting temporary directory"
   umount /mnt/runtime/containerd
@@ -61,9 +100,12 @@ else
   df -h /var/lib/containerd
   vgs
   lvs
-
-  systemctl start containerd
 fi
+
+# /var/lib/containerd is now the LV — unmask so nodeadm-run.service starts
+# containerd exactly once, on the final mount.
+echo "Unmasking containerd; nodeadm-run.service will start it on the LV"
+systemctl unmask containerd
 
 echo "=== LVM Setup Complete ==="
 

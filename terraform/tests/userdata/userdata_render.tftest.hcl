@@ -72,6 +72,51 @@ run "self_managed_render" {
     condition     = !strcontains(output.gpu_userdata, "local-ssd")
     error_message = "gpu user-data must not reference the runtime-probed local-ssd label (removed when NodeConfig moved to a static MIME part)."
   }
+
+  # --- containerd content-store integrity (blob-not-found regression guard) ---
+  # Applied to ALL FOUR provisioning paths (system, gpu, karpenter x86 +
+  # graviton). Each assertion pins one element of the fix so the original race
+  # (stop||true -> rsync/cp||true -> umount-without-sync -> start) and the
+  # node-never-joins regressions (masked-without-reachable-unmask) can't return.
+
+  # 1. mask containerd up front so it never starts on the root volume.
+  assert {
+    condition     = alltrue([for k, v in output.mask_containerd_count : v >= 1])
+    error_message = "every boothook must `systemctl mask containerd` before the LVM migration (prevents the blob-not-found race). Offending paths render mask 0 times."
+  }
+  # 2. mask must be paired with a happy-path unmask, or kubelet never starts.
+  assert {
+    condition     = alltrue([for k, v in output.unmask_containerd_count : v >= 1])
+    error_message = "every boothook must `systemctl unmask containerd` after migration (otherwise the node never joins)."
+  }
+  # 3. unmask must be REACHABLE on failure: an EXIT trap unmasks containerd so a
+  #    `set -e` abort mid-migration can't leave it permanently masked.
+  assert {
+    condition     = alltrue([for k, v in output.unmask_trap_count : v >= 1])
+    error_message = "every boothook must install `trap '... unmask containerd ...' EXIT` right after masking — otherwise a mid-migration failure under set -e strands containerd masked and the node never joins."
+  }
+  # 4. wait for the running containerd to exit before touching its data dir
+  #    (root cause #1: stopped-without-waiting raced the content-store copy).
+  assert {
+    condition     = alltrue([for k, v in output.wait_for_exit_count : v >= 1])
+    error_message = "every boothook must wait for containerd to exit (`pgrep -x containerd` loop) before migrating its data dir."
+  }
+  # 5. fail-fast migration form present (positive guard).
+  assert {
+    condition     = alltrue([for k, v in output.failfast_rsync_count : v >= 1])
+    error_message = "every boothook must use the fail-fast `if ! rsync ... --delete` form so a partial copy is wiped, not silently kept."
+  }
+  # 6. NO swallowed copy errors — neither rsync||true nor cp||true (root cause
+  #    #2; cp||true is the pre-fix form and must not silently return).
+  assert {
+    condition     = alltrue([for k, v in output.swallow_copy_error_count : v == 0])
+    error_message = "no boothook may swallow a content-store copy error (`rsync ... || true` or `cp ... || true`) — a partial store must fail-fast."
+  }
+  # 7. a `sync` must sit BETWEEN the rsync and the umount (root cause #3).
+  assert {
+    condition     = alltrue([for k, v in output.sync_before_umount_count : v >= 1])
+    error_message = "every boothook must `sync` between the rsync and the umount (force blob data onto EBS before the mount swap)."
+  }
 }
 
 run "managed_render" {
