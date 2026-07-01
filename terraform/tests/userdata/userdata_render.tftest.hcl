@@ -131,6 +131,23 @@ run "self_managed_render" {
     condition     = alltrue([for k, v in output.failure_lvremove_count : v >= 1])
     error_message = "every boothook's rsync-failure branch must `lvremove` the half-built lv_containerd so a reboot doesn't remount an empty LV over /var/lib/containerd."
   }
+  # 10. M1: karpenter inline disk selection must distinguish EBS from Instance
+  #     Store via the device model, or containerd could land on ephemeral NVMe.
+  assert {
+    condition     = alltrue([for k, v in output.karpenter_ebs_model_check_count : v >= 1])
+    error_message = "karpenter EC2NodeClass boothooks must select the data disk by EBS device model ('Elastic Block Store'), not just 'first non-root disk' — otherwise containerd can be striped onto Instance Store and lose its content store on stop/start."
+  }
+  # 11. M1: the unsafe 'first non-root disk' lsblk|awk one-liner must not return.
+  assert {
+    condition     = alltrue([for k, v in output.karpenter_unsafe_lsblk_awk_count : v == 0])
+    error_message = "karpenter boothooks must NOT use the unsafe `lsblk | awk '$1!=r {print}'` first-non-root-disk selection (M1) — it can pick an Instance Store disk."
+  }
+  # 12. M2: the GPU containerd reload must be guarded (it is the only start of
+  #     containerd on the GPU happy path, under set -e).
+  assert {
+    condition     = output.gpu_guarded_restart_count >= 1
+    error_message = "gpu boothook must guard `systemctl restart containerd` (use `if ! systemctl restart containerd`) — a bare restart under set -e would abort bringup with containerd stopped (node NotReady)."
+  }
 }
 
 run "managed_render" {
