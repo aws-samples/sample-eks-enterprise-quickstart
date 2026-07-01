@@ -133,10 +133,11 @@ output "unmask_trap_count" {
 output "wait_for_exit_count" {
   value = { for k, b in local._boothooks : k => length(regexall("pgrep[[:space:]]+-x[[:space:]]+containerd", b)) }
 }
-# Fail-fast migration form must be present (positive guard — removing the
-# `if ! rsync ... ` form must fail CI, not just removing a `|| true`).
+# Fail-fast migration form must be present (positive guard). The migration
+# rsync must gate the mount-swap: `if rsync ...; then <swap>; else <abandon>`.
+# Removing the conditional (making the swap unconditional) must fail CI.
 output "failfast_rsync_count" {
-  value = { for k, b in local._boothooks : k => length(regexall("if[[:space:]]*![[:space:]]*rsync", b)) }
+  value = { for k, b in local._boothooks : k => length(regexall("if[[:space:]]+rsync[[:space:]]+-aHAX", b)) }
 }
 # NO swallowed copy errors: neither `rsync ... || true` NOR `cp ... || true`
 # for the content-store copy (a cp||true revert is the original root cause #2).
@@ -149,4 +150,18 @@ output "swallow_copy_error_count" {
 # (after the stop loop) remains.
 output "sync_before_umount_count" {
   value = { for k, b in local._boothooks : k => length(regexall("rsync[\\s\\S]*\n[[:space:]]*sync[[:space:]]*\n[\\s\\S]*umount", b)) }
+}
+# awslabs/amazon-eks-ami#2122 guard: on rsync failure the migration must be
+# ABANDONED (fall back to the AMI's root-volume /var/lib/containerd, which holds
+# the pre-cached `localhost/kubernetes/pause` that cannot be re-pulled). The old
+# fallback wiped the target with `rm -rf` and then mounted an empty LV over
+# /var/lib/containerd — that reproduces #2122. This must never reappear: no
+# `rm -rf` of the migration target anywhere in the boothook.
+output "wipe_target_count" {
+  value = { for k, b in local._boothooks : k => length(regexall("rm[[:space:]]+-rf[^\n]*(runtime/containerd|TEMP_MOUNT)", b)) }
+}
+# The failure branch must tear down the half-built LV (lvremove) so a reboot
+# doesn't remount an empty volume over the intact root-volume content store.
+output "failure_lvremove_count" {
+  value = { for k, b in local._boothooks : k => length(regexall("lvremove[^\n]*lv_containerd", b)) }
 }

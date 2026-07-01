@@ -101,10 +101,11 @@ run "self_managed_render" {
     condition     = alltrue([for k, v in output.wait_for_exit_count : v >= 1])
     error_message = "every boothook must wait for containerd to exit (`pgrep -x containerd` loop) before migrating its data dir."
   }
-  # 5. fail-fast migration form present (positive guard).
+  # 5. fail-fast migration form present (positive guard): the mount-swap must be
+  #    gated on rsync success (`if rsync ...; then <swap>; else <abandon>`).
   assert {
     condition     = alltrue([for k, v in output.failfast_rsync_count : v >= 1])
-    error_message = "every boothook must use the fail-fast `if ! rsync ... --delete` form so a partial copy is wiped, not silently kept."
+    error_message = "every boothook must gate the mount-swap on `if rsync -aHAX ...` so a failed copy is never mounted over /var/lib/containerd."
   }
   # 6. NO swallowed copy errors — neither rsync||true nor cp||true (root cause
   #    #2; cp||true is the pre-fix form and must not silently return).
@@ -116,6 +117,19 @@ run "self_managed_render" {
   assert {
     condition     = alltrue([for k, v in output.sync_before_umount_count : v >= 1])
     error_message = "every boothook must `sync` between the rsync and the umount (force blob data onto EBS before the mount swap)."
+  }
+  # 8. awslabs/amazon-eks-ami#2122 guard: on rsync failure the migration must be
+  #    ABANDONED (keep the AMI's root-volume /var/lib/containerd with its
+  #    pre-cached localhost/kubernetes/pause), NOT wiped-and-mounted-empty.
+  assert {
+    condition     = alltrue([for k, v in output.wipe_target_count : v == 0])
+    error_message = "no boothook may `rm -rf` the migration target — wiping then mounting an empty LV drops the pre-cached pause image and reproduces amazon-eks-ami#2122 (node never joins). Abandon the migration instead."
+  }
+  # 9. the failure branch must tear down the half-built LV so a reboot doesn't
+  #    remount an empty volume over the intact root-volume content store.
+  assert {
+    condition     = alltrue([for k, v in output.failure_lvremove_count : v >= 1])
+    error_message = "every boothook's rsync-failure branch must `lvremove` the half-built lv_containerd so a reboot doesn't remount an empty LV over /var/lib/containerd."
   }
 }
 
