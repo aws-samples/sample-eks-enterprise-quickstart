@@ -69,25 +69,37 @@ else
   mkdir -p /mnt/runtime/containerd
   mount /dev/vg_data/lv_containerd /mnt/runtime/containerd
 
-  # fail-fast: a partial copy must NOT survive. --delete keeps the target
-  # clean; on ANY rsync error we wipe the target and let containerd start from
-  # an empty store (images are re-pulled at runtime) rather than from a corrupt
-  # one. No more "|| true" silently keeping a half-copied content store.
-  if ! rsync -aHAX --delete /var/lib/containerd/ /mnt/runtime/containerd/; then
-    echo "ERROR: rsync failed; wiping target to avoid a partial/corrupt content store"
-    rm -rf /mnt/runtime/containerd/* /mnt/runtime/containerd/.[!.]* 2>/dev/null || true
+  # fail-fast: a partial copy must NOT survive. --delete keeps the target clean.
+  # On ANY rsync error we must NOT continue onto an empty LV: AL2023 EKS AMIs
+  # (built after 2024-11-12, awslabs/amazon-eks-ami#2000 — all K8s versions on
+  # AL2023, not just 1.31) pre-cache the pause image and pin
+  # `sandbox_image = localhost/kubernetes/pause`, a LOCAL reference that CANNOT
+  # be re-pulled from any registry. Booting containerd on an empty store would
+  # reproduce awslabs/amazon-eks-ami#2122 (pause pull -> 127.0.0.1:443 refused,
+  # node never joins). So on failure we ABANDON the data-disk migration and keep
+  # containerd on the AMI's root-volume /var/lib/containerd (pre-cache intact):
+  # degraded (containerd data not on the LV) but the node still joins.
+  if rsync -aHAX --delete /var/lib/containerd/ /mnt/runtime/containerd/; then
+    # Force blob data onto EBS before swapping the mount (XFS may have committed
+    # metadata while blob file data is still in page cache).
+    sync
+    sleep 2
+
+    umount /mnt/runtime/containerd
+    mount /dev/vg_data/lv_containerd /var/lib/containerd
+
+    grep -q "lv_containerd" /etc/fstab || \
+      echo "/dev/vg_data/lv_containerd /var/lib/containerd xfs defaults,nofail 0 2" >> /etc/fstab
+  else
+    echo "ERROR: rsync failed; abandoning data-disk migration to preserve the"
+    echo "AMI's pre-cached pause image. containerd stays on the root volume."
+    umount /mnt/runtime/containerd || true
+    # Tear down the half-built LV so a reboot doesn't remount an empty volume
+    # over the (intact) root-volume /var/lib/containerd.
+    lvremove -f /dev/vg_data/lv_containerd 2>/dev/null || true
+    vgremove -f vg_data 2>/dev/null || true
+    pvremove -f "$DISK" 2>/dev/null || true
   fi
-
-  # Force blob data onto EBS before swapping the mount (XFS may have committed
-  # metadata while blob file data is still in page cache).
-  sync
-  sleep 2
-
-  umount /mnt/runtime/containerd
-  mount /dev/vg_data/lv_containerd /var/lib/containerd
-
-  grep -q "lv_containerd" /etc/fstab || \
-    echo "/dev/vg_data/lv_containerd /var/lib/containerd xfs defaults,nofail 0 2" >> /etc/fstab
 fi
 
 # /var/lib/containerd is now the LV — unmask so the SystemdCgroup reload below
