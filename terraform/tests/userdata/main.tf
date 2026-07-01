@@ -165,3 +165,32 @@ output "wipe_target_count" {
 output "failure_lvremove_count" {
   value = { for k, b in local._boothooks : k => length(regexall("lvremove[^\n]*lv_containerd", b)) }
 }
+
+# M1 — Instance Store guard (karpenter EC2NodeClasses only; the .tpl paths use
+# the detect-ebs-disk.sh helper which already does this). The inline disk
+# selection MUST distinguish EBS from ephemeral NVMe via the device model, or
+# containerd could be striped onto Instance Store and lose its content store on
+# stop/start. The two karpenter boothooks select the disk inline.
+locals {
+  _karpenter_boothooks = {
+    x86      = local.x86_boothook
+    graviton = local.graviton_boothook
+  }
+}
+# Must match on the EBS device model (whitelist EBS), not just "first non-root".
+output "karpenter_ebs_model_check_count" {
+  value = { for k, b in local._karpenter_boothooks : k => length(regexall("Elastic Block Store", b)) }
+}
+# The unsafe "first non-root disk" one-liner must NOT reappear: a bare
+# `lsblk ... | awk ... $1!=r ... print $1` with no model check is the M1 bug.
+output "karpenter_unsafe_lsblk_awk_count" {
+  value = { for k, b in local._karpenter_boothooks : k => length(regexall("lsblk[^\n]*awk[^\n]*!=r[^\n]*print", b)) }
+}
+
+# M2 — the GPU containerd/kubelet reload is the only start of containerd on the
+# GPU happy path and runs under `set -e`; it must be guarded so a restart
+# failure can't abort bringup with containerd stopped. Require the guarded form
+# (`if ! systemctl restart containerd`) rather than a bare restart.
+output "gpu_guarded_restart_count" {
+  value = length(regexall("if[[:space:]]*![[:space:]]*systemctl[[:space:]]+restart[[:space:]]+containerd", local.gpu_boothook))
+}

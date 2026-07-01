@@ -248,8 +248,21 @@ echo "=== boothook complete; NodeConfig is delivered as a separate node.eks.aws 
 # We deliberately DO NOT touch nvidia-container-runtime mode / enable_cdi /
 # accept-nvidia-visible-devices — toolkit 1.19's jit-cdi default handles
 # device injection; forcing legacy mode BREAKS workload pod driver injection.
-systemctl restart containerd
-systemctl restart kubelet
+#
+# Guard both restarts: this is the ONLY start of containerd on the happy path
+# (the LVM block above no longer starts it in-line), and the script runs under
+# `set -e`. A bare `systemctl restart` that fails would abort the boothook here,
+# skipping the kubelet restart and EFA install and leaving containerd stopped
+# (node NotReady). On restart failure, fall back to a plain start so containerd
+# is at least running, and never let it abort the rest of bringup.
+if ! systemctl restart containerd; then
+  echo "WARN: containerd restart failed; attempting plain start"
+  systemctl start containerd || echo "ERROR: containerd failed to start"
+fi
+if ! systemctl restart kubelet; then
+  echo "WARN: kubelet restart failed; attempting plain start"
+  systemctl start kubelet || echo "ERROR: kubelet failed to start"
+fi
 
 # ============================================================
 # EFA userspace (libfabric-aws + openmpi5-aws)
