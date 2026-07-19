@@ -11,6 +11,35 @@ set -ex
 exec > >(tee /var/log/gpu-node-bootstrap.log)
 exec 2>&1
 
+# g7 (10de:2c3a) open-kmod fixup: the AMI's nvidia-open supported-devices
+# allowlist is missing the RTX PRO 4500 Server Edition PCI ID, so the
+# proprietary kmod gets loaded — Blackwell requires the open kmod and all
+# GPUs fail with RmInitAdapter 0x22:0x56:897. Appending the ID here lets
+# the AMI's own nvidia-kmod-load.service (After=network-online, i.e. always
+# after this boothook) pick the open kmod itself. Auto no-op once the AMI
+# list is fixed upstream (awslabs/amazon-eks-ami#2768); non-g7 instance
+# types skip the whole block via the lspci gate.
+# ⚠️ Never `systemctl start` a service that is After=network-online from a
+# boothook — network-online waits for cloud-init, which waits for this
+# script: three-way deadlock, the instance never finishes booting.
+echo "=== NVIDIA open-kmod fixup (g7 / 2C3A) ==="
+SUPPORTED_LIST=$(ls /etc/eks/nvidia-open-supported-devices-*.txt 2>/dev/null | head -1)
+if [ -n "$SUPPORTED_LIST" ] && lspci -n -d 10de: 2>/dev/null | grep -qi "2c3a"; then
+  grep -qi "^0x2C3A" "$SUPPORTED_LIST" || \
+    echo "0x2C3A  NVIDIA RTX PRO 4500 Blackwell" >> "$SUPPORTED_LIST"
+  REBOOT_MARKER=/var/lib/nvidia-open-fixup-rebooted
+  if lsmod | grep -q "^nvidia " && modinfo nvidia 2>/dev/null | grep -q "^license:.*NVIDIA$"; then
+    if [ ! -f "$REBOOT_MARKER" ]; then
+      echo "Proprietary kmod on Blackwell — one-shot reboot to reload as nvidia-open"
+      touch "$REBOOT_MARKER"
+      shutdown -r now
+      exit 0
+    else
+      echo "ERROR: proprietary kmod still loaded after fixup reboot — manual intervention needed"
+    fi
+  fi
+fi
+
 echo "=== Starting GPU Node LVM Setup ==="
 
 # containerd MUST start exactly once, on the final LV. The AMI's containerd

@@ -143,6 +143,11 @@ resource "kubernetes_daemon_set_v1" "efa_device_plugin" {
 # Notes:
 #   gfd.enabled=true     → GPU Feature Discovery sidecar (nvidia.com/gpu.product etc.)
 #   mofedEnabled=false   → AWS EFA plugin owns /dev/infiniband/uverbs*
+#   nfd.worker.tolerations override is REQUIRED: the NFD subchart's default
+#   toleration is nvidia.com/gpu=present (Equal), which never matches our
+#   node taint value "true" — NFD can't land on GPU nodes, the
+#   feature.node.kubernetes.io/* labels the plugin's nodeAffinity depends
+#   on are never applied, and the DaemonSet silently stays at desired=0.
 resource "helm_release" "nvidia_device_plugin" {
   count = local.is_standard ? 1 : 0
 
@@ -163,6 +168,11 @@ resource "helm_release" "nvidia_device_plugin" {
     mofedEnabled = false
     gfd = {
       enabled = true
+    }
+    nfd = {
+      worker = {
+        tolerations = local.gpu_tolerations
+      }
     }
     nodeSelector = local.gpu_node_selector
     tolerations  = local.gpu_tolerations
