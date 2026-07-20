@@ -34,6 +34,14 @@ locals {
     "g7e.12xlarge" = { efa_only_count = 0, primary_efa = true }
     "g7e.24xlarge" = { efa_only_count = 1, primary_efa = true }
     "g7e.48xlarge" = { efa_only_count = 3, primary_efa = true }
+
+    # G7 (NVIDIA RTX PRO 4500 Blackwell) — EFA on 8xlarge+.
+    # MaximumNetworkCards: 1 for 8/12/24xlarge, 2 for 48xlarge (per
+    # DescribeInstanceTypes MaximumEfaInterfaces). 2/4xlarge have no EFA.
+    "g7.8xlarge"  = { efa_only_count = 0, primary_efa = true }
+    "g7.12xlarge" = { efa_only_count = 0, primary_efa = true }
+    "g7.24xlarge" = { efa_only_count = 0, primary_efa = true }
+    "g7.48xlarge" = { efa_only_count = 1, primary_efa = true }
   }
 
   # NG key = "<resource-name>-<purchase>-<suffix>". Used as for_each key
