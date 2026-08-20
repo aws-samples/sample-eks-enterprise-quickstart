@@ -244,6 +244,7 @@ responsibility:
 - IAM role + GPU SG (with EFA self-egress) + Launch Template + NodeGroup
 - EFA interface counts:
   - p5.48xlarge: 32 ENIs (1 primary + 31 EFA-only)
+  - p5e.48xlarge: 32 ENIs (1 primary + 31 EFA-only)
   - p5en.48xlarge: 16 ENIs (1 primary + 15 EFA-only)
   - p6-b200.48xlarge: 8 ENIs (1 primary + 7 EFA-only)
   - p6-b300.48xlarge: 17 ENIs (1 primary + 16 EFA-only)

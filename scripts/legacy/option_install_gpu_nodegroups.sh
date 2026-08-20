@@ -15,6 +15,7 @@ echo "with pre-configured EFA + EFA-only interfaces in Launch Templates."
 echo ""
 echo "Supported GPU types:"
 echo "  • p5.48xlarge:      1 EFA + 31 EFA-only (NetworkCardIndex 0-31)"
+echo "  • p5e.48xlarge:     1 EFA + 31 EFA-only (NetworkCardIndex 0-31)"
 echo "  • p5en.48xlarge:    1 EFA + 15 EFA-only (NetworkCardIndex 0-15)"
 echo "  • p6-b200.48xlarge: 1 EFA + 7 EFA-only  (NetworkCardIndex 0-7)"
 echo "  • p6-b300.48xlarge: 16 EFA-only on NIC 1-16 (NIC 0 = ENA only; MaxEFA=16)"
@@ -261,6 +262,7 @@ get_efa_only_card_count() {
     local instance_type=$1
     case "$instance_type" in
         p5.48xlarge)      echo 31 ;;   # NetworkCardIndex 1-31
+        p5e.48xlarge)     echo 31 ;;   # NetworkCardIndex 1-31 (H200, same as p5)
         p5en.48xlarge)    echo 15 ;;   # NetworkCardIndex 1-15
         p6-b200.48xlarge) echo 7 ;;    # NetworkCardIndex 1-7
         p6-b300.48xlarge) echo 16 ;;   # NetworkCardIndex 1-16
@@ -287,7 +289,7 @@ get_efa_only_card_count() {
 instance_supports_primary_efa() {
     local instance_type=$1
     case "$instance_type" in
-        p5.48xlarge|p5en.48xlarge|p6-b200.48xlarge) return 0 ;;
+        p5.48xlarge|p5e.48xlarge|p5en.48xlarge|p6-b200.48xlarge) return 0 ;;
         g6e.8xlarge|g6e.12xlarge|g6e.16xlarge|g6e.24xlarge|g6e.48xlarge) return 0 ;;
         g7e.8xlarge|g7e.12xlarge|g7e.24xlarge|g7e.48xlarge) return 0 ;;
         p6-b300.48xlarge) return 1 ;;   # NIC 0 = ENA only

@@ -15,6 +15,7 @@ locals {
   efa_layout = {
     # Multi-NIC training accelerators
     "p5.48xlarge"      = { efa_only_count = 31, primary_efa = true }
+    "p5e.48xlarge"     = { efa_only_count = 31, primary_efa = true } # H200; same 32-NIC layout as p5
     "p5en.48xlarge"    = { efa_only_count = 15, primary_efa = true }
     "p6-b200.48xlarge" = { efa_only_count = 7, primary_efa = true }
     "p6-b300.48xlarge" = { efa_only_count = 16, primary_efa = false } # NIC 0 = ENA only
