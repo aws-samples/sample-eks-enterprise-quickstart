@@ -16,9 +16,24 @@ exec 2>&1
 # proprietary kmod gets loaded — Blackwell requires the open kmod and all
 # GPUs fail with RmInitAdapter 0x22:0x56:897. Appending the ID here lets
 # the AMI's own nvidia-kmod-load.service (After=network-online, i.e. always
-# after this boothook) pick the open kmod itself. Auto no-op once the AMI
-# list is fixed upstream (awslabs/amazon-eks-ami#2768); non-g7 instance
-# types skip the whole block via the lspci gate.
+# after this boothook) pick the open kmod itself; non-g7 instance types skip
+# the whole block via the lspci gate.
+#
+# UPSTREAM STATUS (checked 2026-08-20): awslabs/amazon-eks-ami#2768 was
+# closed 2026-07-22 WITHOUT adding the ID to the 580 list. 0x2C3A ships only
+# in nvidia-open-supported-devices-595.txt, and AWS stated they "don't plan
+# to look into support for the same on 580". The default EKS NVIDIA AMI is
+# still 580 (v20260810 = 580.159.03, v20260818 = 580.178.04) and SSM
+# publishes no 595 variant, so this block does NOT auto-no-op today — it is
+# load-bearing for every g7 node launched on the default AMI. Empirically
+# the 580 open kmod does drive this GPU (verified on g7.48xlarge / EKS 1.34:
+# 8 GPUs, open kmod, Dual MIT/GPL), but that combination is not AWS-
+# supported. AWS's supported path is a custom 595 AMI — see
+# awslabs/amazon-eks-ami doc/usage/g7-ami.md, then point
+# var.gpu_custom_ami_id at it. NOTE 595 is incompatible with P3 / P3dn /
+# G6f, so a 595 AMI cannot serve a mixed fleet; keep those on 580 in a
+# separate nodegroup. The block self-disables once a default AMI ships
+# driver >= 595 (its allowlist already contains 0x2C3A).
 # ⚠️ Never `systemctl start` a service that is After=network-online from a
 # boothook — network-online waits for cloud-init, which waits for this
 # script: three-way deadlock, the instance never finishes booting.
