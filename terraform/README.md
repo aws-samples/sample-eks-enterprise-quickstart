@@ -206,6 +206,7 @@ registered:
 | Instance | NIC0 type | Extra EFA-only NICs | Notes |
 |---|---|---|---|
 | `p5.48xlarge` | `efa` | 31 | H100, full multi-NIC |
+| `p5e.48xlarge` | `efa` | 31 | H200, same 32-NIC layout as p5 |
 | `p5en.48xlarge` | `efa` | 15 | H200 |
 | `p6-b200.48xlarge` | `efa` | 7 | B200 |
 | `p6-b300.48xlarge` | `interface` | 16 | B300; NIC 0 = ENA only |
