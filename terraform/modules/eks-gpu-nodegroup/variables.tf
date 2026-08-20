@@ -40,6 +40,15 @@ nvidia-container-toolkit jit-cdi config in /etc/containerd/config.toml).
 Building from plain AL2023 is unsupported — see docs/AMI_VERSIONS.md for
 the tightly-coupled-stack rationale.
 
+g7 note: AWS's supported path for g7 is a custom AMI built with NVIDIA
+driver 595 (the default AMI is still 580, whose nvidia-open allowlist has
+no 0x2C3A). Build per awslabs/amazon-eks-ami doc/usage/g7-ami.md and pass
+the resulting AMI here. 595 is incompatible with P3 / P3dn / G6f, so such
+an AMI must not be shared with those instance types — give them their own
+nodegroup on the default AMI. Without a 595 AMI the node userdata applies
+an allowlist fixup so g7 still comes up on 580 (works empirically, not
+AWS-supported); see templates/userdata.sh.tpl.
+
 When set, gpu_ami_release_version is ignored.
 EOT
   default     = ""
