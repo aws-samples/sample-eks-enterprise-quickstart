@@ -130,9 +130,12 @@ DEPLOY_GPU_CB="${DEPLOY_GPU_CB:-false}"
 # /opt/amazon/efa/ — same as the long-noted Ohio p5en gap.
 GPU_INSTALL_EFA_USERSPACE="${GPU_INSTALL_EFA_USERSPACE:-true}"
 
-# Pin a specific aws-efa-installer tarball so node bringup is reproducible
-# across time. Bump after smoke-testing on a fresh node. Empty = "latest"
-# (rolls forward — breaks reproducibility, do not use in production).
+# FALLBACK aws-efa-installer version. Node userdata installs the EFA
+# userspace from the SAME installer release the AMI's EFA kmod came from (read
+# from /opt/amazon/efa_installed_packages), so kmod/rdma-core/libfabric never
+# drift; this value is only used when the AMI carries no such record (e.g. a
+# custom AMI). "latest" rolls forward — breaks reproducibility, do not use in
+# production.
 GPU_EFA_INSTALLER_VERSION="${GPU_EFA_INSTALLER_VERSION:-1.48.0}"
 
 # ------------------------------------------------------------
@@ -1120,24 +1123,95 @@ systemctl restart kubelet
 # on the host's libfabric, we need the full userspace install.
 #
 # Enable with GPU_INSTALL_EFA_USERSPACE=true (default: true).
-# Tarball version pinned via GPU_EFA_INSTALLER_VERSION (e.g. "1.48.0"); empty
-# = "latest" (rolls forward, breaks reproducibility).
+#
+# Version policy — the AMI is the single source of truth (same logic as the
+# Terraform template modules/eks-gpu-nodegroup/templates/userdata.sh.tpl):
+# the EKS GPU AMI build runs the "latest" installer with --minimal (EFA kmod +
+# rdma-core/libefa only) and the installer records its version in
+# /opt/amazon/efa_installed_packages ("# EFA installer version: X.Y.Z"). We
+# install the userspace from that SAME release so kmod, rdma-core and
+# libfabric never drift apart. GPU_EFA_INSTALLER_VERSION is only the fallback
+# for AMIs without that record.
+#
+# --skip-kmod = don't rebuild kernel module (AMI already has it, same release)
+# -y = non-interactive
+# NOTE: do NOT pass --minimal; it excludes libfabric-aws + openmpi5-aws
+# (the whole point — we want /opt/amazon/efa/bin/fi_info and friends)
+# The tarball is GPG-verified against the AWS EFA signing key fingerprint
+# 4E90 91BC BB97 A96B 26B1 5E59 A054 80B1 DD2D 3CCC (AWS EFA docs) before the
+# installer runs. Failures only WARN — bringup is never aborted.
 if [ "${GPU_INSTALL_EFA_USERSPACE}" = "true" ] && [ ! -x /opt/amazon/efa/bin/fi_info ]; then
-  EFA_INSTALLER_TARBALL="aws-efa-installer-${GPU_EFA_INSTALLER_VERSION:-latest}.tar.gz"
-  echo "=== Installing EFA userspace (libfabric-aws + openmpi5-aws) — \$EFA_INSTALLER_TARBALL ==="
-  # --skip-kmod = don't rebuild kernel module (AMI already has it)
-  # -y = non-interactive
-  # NOTE: do NOT pass --minimal; it excludes libfabric-aws + openmpi5-aws
-  # (the whole point — we want /opt/amazon/efa/bin/fi_info and friends)
-  ( cd /tmp && \
-    curl -fsSLO "https://efa-installer.amazonaws.com/\${EFA_INSTALLER_TARBALL}" && \
-    tar -xf "\${EFA_INSTALLER_TARBALL}" && \
-    cd aws-efa-installer && \
-    ./efa_installer.sh -y --skip-kmod 2>&1 | tail -30 ) || \
-    echo "WARN: efa_installer failed; containers with their own libfabric will still work"
+  EFA_PKGS_RECORD=/opt/amazon/efa_installed_packages
+  EFA_FALLBACK_VERSION="${GPU_EFA_INSTALLER_VERSION:-latest}"
+  AMI_EFA_VERSION=""
+  if [ -f "\$EFA_PKGS_RECORD" ]; then
+    AMI_EFA_VERSION=\$(sed -n 's/^# EFA installer version: *\([0-9][0-9.]*\).*$/\1/p' "\$EFA_PKGS_RECORD" | head -n 1)
+  fi
+  if [[ "\$AMI_EFA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\$ ]]; then
+    EFA_VERSION="\$AMI_EFA_VERSION"
+    echo "EFA installer version \$EFA_VERSION (from AMI record \$EFA_PKGS_RECORD)"
+    if [ "\$EFA_FALLBACK_VERSION" != "\$EFA_VERSION" ]; then
+      echo "NOTE: GPU_EFA_INSTALLER_VERSION=\$EFA_FALLBACK_VERSION not used — AMI record wins so kmod/rdma-core/libfabric stay on one release"
+    fi
+  else
+    EFA_VERSION="\$EFA_FALLBACK_VERSION"
+    echo "WARN: no EFA installer version recorded in \$EFA_PKGS_RECORD; falling back to GPU_EFA_INSTALLER_VERSION=\$EFA_VERSION (kmod and userspace may come from different releases)"
+  fi
+
+  # Runs in a subshell (cd + early returns stay contained). Each step is
+  # checked explicitly because set -e is suspended inside "( ... ) ||".
+  efa_userspace_install() {
+    local base=https://efa-installer.amazonaws.com
+    local tarball="aws-efa-installer-\$EFA_VERSION.tar.gz"
+    local rc=0
+    cd "\$EFA_WORKDIR" || return 1
+    echo "=== Installing EFA userspace (\$tarball, --skip-kmod) ==="
+    if ! { curl -fsSLO "\$base/\$tarball" && curl -fsSLO "\$base/\$tarball.sig" && curl -fsSLO "\$base/aws-efa-installer.key"; }; then
+      echo "ERROR: failed to download \$tarball (+ .sig / signing key) from \$base"
+      return 1
+    fi
+    mkdir -m 700 "\$EFA_WORKDIR/gnupg" || return 1
+    if ! GNUPGHOME="\$EFA_WORKDIR/gnupg" gpg --batch --quiet --import aws-efa-installer.key; then
+      echo "ERROR: failed to import the EFA signing key"
+      return 1
+    fi
+    # VALIDSIG's last field is the primary-key fingerprint of the signer.
+    if ! GNUPGHOME="\$EFA_WORKDIR/gnupg" gpg --batch --status-fd 1 --verify "\$tarball.sig" "\$tarball" 2>/dev/null \
+        | grep -Eq '^\[GNUPG:\] VALIDSIG .* 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC\$'; then
+      echo "ERROR: \$tarball is not validly signed by the AWS EFA key — refusing to run the installer"
+      return 1
+    fi
+    if ! tar -xf "\$tarball"; then
+      echo "ERROR: failed to extract \$tarball"
+      return 1
+    fi
+    rm -f "\$tarball"
+    cd aws-efa-installer || return 1
+    # Full log kept on disk; the exit code is the installer's own (piping
+    # straight into tail would report tail's status and hide failures).
+    ./efa_installer.sh -y --skip-kmod > /var/log/efa-installer.log 2>&1 || rc=\$?
+    tail -n 30 /var/log/efa-installer.log
+    if [ "\$rc" -ne 0 ]; then
+      echo "WARN: efa_installer.sh exited \$rc (full log: /var/log/efa-installer.log)"
+    fi
+    return "\$rc"
+  }
+
+  # /tmp is tmpfs on AL2023 and the tarball is ~650 MB: always clean up.
+  if EFA_WORKDIR=\$(mktemp -d /tmp/efa-installer.XXXXXX); then
+    ( efa_userspace_install ) || \\
+      echo "WARN: EFA userspace install did not complete; containers with their own libfabric will still work"
+    rm -rf "\$EFA_WORKDIR"
+  else
+    echo "WARN: mktemp failed; skipping EFA userspace install"
+  fi
+
   if [ -x /opt/amazon/efa/bin/fi_info ]; then
     echo "EFA userspace installed at /opt/amazon/efa/"
-    /opt/amazon/efa/bin/fi_info --version 2>&1 | head -1 || true
+    echo "  installer release : \$(sed -n 's/^# EFA installer version: *//p' "\$EFA_PKGS_RECORD" 2>/dev/null | head -n 1)"
+    echo "  efa kmod          : \$(cat /sys/module/efa/version 2>/dev/null || modinfo -F version efa 2>/dev/null || echo unknown)"
+    echo "  libfabric         : \$(/opt/amazon/efa/bin/fi_info --version 2>/dev/null | head -n 1)"
+    rpm -q rdma-core libibverbs libfabric-aws 2>/dev/null || true
   fi
 else
   echo "Skipping EFA userspace install (already present or GPU_INSTALL_EFA_USERSPACE!=true)"
