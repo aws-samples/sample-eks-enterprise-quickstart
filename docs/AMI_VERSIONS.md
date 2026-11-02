@@ -93,23 +93,49 @@ aws ssm get-parameter \
 4. End-to-end test: launch a non-privileged stripped CUDA pod
    (`nvcr.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04`), exec
    `nvidia-smi -L`, expect a list of GPUs
-5. Update this file with the new row
-6. Roll forward production
+5. On an EFA node, check `/var/log/gpu-node-bootstrap.log` shows
+   `EFA installer version X.Y.Z (from AMI record ...)` (not the
+   `falling back` WARN) — see [EFA component versions](#efa-component-versions)
+6. Update this file with the new row
+7. Roll forward production
 
 ## EFA component versions
 
-Three independent EFA artifacts. Two are pinned in this repo; one rides
-with the AMI. Bumping any of them is independent of the AMI matrix above.
+Three EFA artifacts. The kernel side and the host userspace are tied to
+the same `aws-efa-installer` release (see below); the device plugin is
+independent of the AMI matrix above.
 
 | Component | Source | Pin location | Default |
 |---|---|---|---|
-| EFA kernel module + rdma-core | EKS GPU AMI (preinstalled) | `gpu_ami_release_version` | follows AMI |
-| EFA userspace (libfabric-aws + openmpi5-aws + `fi_info`) | `https://efa-installer.amazonaws.com/aws-efa-installer-<v>.tar.gz` fetched in node userdata | `gpu_efa_installer_version` (Terraform) / `GPU_EFA_INSTALLER_VERSION` (bash) | `1.48.0` |
+| EFA kernel module + rdma-core | EKS GPU AMI (preinstalled by `efa_installer.sh --minimal` at AMI build time) | `gpu_ami_release_version` | follows AMI |
+| EFA userspace (libfabric-aws + openmpi5-aws + `fi_info`) | `https://efa-installer.amazonaws.com/aws-efa-installer-<v>.tar.gz` fetched (GPG-verified) in node userdata | **follows AMI** — `<v>` is read from the AMI's `/opt/amazon/efa_installed_packages`. `gpu_efa_installer_version` (Terraform) / `GPU_EFA_INSTALLER_VERSION` (bash) is only the fallback when that record is missing | AMI's release (fallback `1.48.0`) |
 | `aws-efa-k8s-device-plugin` DaemonSet | `602401143452.dkr.ecr.<region>.amazonaws.com/eks/aws-efa-k8s-device-plugin` | `efa_device_plugin_version` (Terraform) / `EFA_DEVICE_PLUGIN_VERSION` (bash) | `v0.5.19` |
 
-Userspace bump: bump the version, `terraform apply` rolls launch
-templates, replace nodes (or wait for next scaling event). Verify with
-`/opt/amazon/efa/bin/fi_info --version` on the node.
+Why userspace follows the AMI: the AMI build runs the `latest` installer
+with `--minimal` (kmod + rdma-core only), so the kernel side's version is
+whatever was latest on the AMI's build date. Installing userspace from a
+separately pinned release would let kmod / rdma-core / libfabric drift apart
+on every AMI bump. Userdata instead installs the userspace from the same
+release with `--skip-kmod`, so an AMI bump moves all three together and no
+separate EFA bump is needed.
+
+Userspace bump: bump `gpu_ami_release_version` — the userspace follows
+(the fallback variable only matters for custom AMIs without the version
+record). `terraform apply` rolls launch templates; replace nodes (or wait
+for next scaling event). Verify on the node — the bootstrap log
+(`/var/log/gpu-node-bootstrap.log`) prints the installer release, efa kmod
+and libfabric versions after install, and the full installer log is at
+`/var/log/efa-installer.log`:
+
+```bash
+grep '^# EFA installer version' /opt/amazon/efa_installed_packages
+cat /sys/module/efa/version
+/opt/amazon/efa/bin/fi_info --version
+```
+
+If the log shows `WARN: no EFA installer version recorded`, the node fell
+back to the pinned version and kernel/userspace may come from different
+releases.
 
 Plugin bump: bump the version, `terraform apply` (or rerun
 `option_install_gpu_stack.sh`) rolls the DaemonSet. Verify with

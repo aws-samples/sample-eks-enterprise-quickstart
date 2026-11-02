@@ -414,8 +414,13 @@ variable "gpu_install_efa_userspace" {
 
 variable "gpu_efa_installer_version" {
   type        = string
-  description = "aws-efa-installer tarball version pinned in node userdata, e.g. \"1.48.0\". Pinning makes node bringup reproducible. Empty = follow \"latest\" (rolls forward, breaks reproducibility)."
+  description = "FALLBACK aws-efa-installer version for GPU node userdata, e.g. \"1.48.0\". Node userdata installs the EFA userspace from the SAME installer release the AMI's EFA kmod came from (read from /opt/amazon/efa_installed_packages), so kmod/rdma-core/libfabric never drift; this value is used only when the AMI carries no such record (e.g. a custom AMI). Empty = \"latest\" (rolls forward, breaks reproducibility)."
   default     = "1.48.0"
+
+  validation {
+    condition     = can(regex("^(latest|[0-9]+\\.[0-9]+\\.[0-9]+)?$", var.gpu_efa_installer_version))
+    error_message = "gpu_efa_installer_version must be empty, \"latest\", or an X.Y.Z version such as \"1.48.0\"."
+  }
 }
 
 variable "gpu_enable_local_lvm" {

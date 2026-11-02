@@ -131,8 +131,13 @@ variable "install_efa_userspace" {
 
 variable "efa_installer_version" {
   type        = string
-  description = "aws-efa-installer tarball version pinned in node userdata, e.g. \"1.48.0\". The EKS GPU AMI ships only kernel-side EFA; userspace (libfabric-aws + openmpi5-aws) is fetched from https://efa-installer.amazonaws.com at first boot. Pinning a version makes node bringup reproducible across time. Empty = use \"latest\" (not recommended for production)."
+  description = "FALLBACK aws-efa-installer version for node userdata, e.g. \"1.48.0\". The EKS GPU AMI ships only kernel-side EFA (kmod + rdma-core, installed by efa_installer.sh --minimal at AMI build time); userspace (libfabric-aws + openmpi5-aws) is fetched from https://efa-installer.amazonaws.com at first boot. Userdata reads the AMI's installer version from /opt/amazon/efa_installed_packages and installs the userspace from that SAME release, so kmod/rdma-core/libfabric never drift; this value is used only when the AMI carries no such record (e.g. a custom AMI). Empty = use \"latest\" (not recommended for production)."
   default     = "1.48.0"
+
+  validation {
+    condition     = can(regex("^(latest|[0-9]+\\.[0-9]+\\.[0-9]+)?$", var.efa_installer_version))
+    error_message = "efa_installer_version must be empty, \"latest\", or an X.Y.Z version such as \"1.48.0\"."
+  }
 }
 
 variable "enable_local_lvm" {

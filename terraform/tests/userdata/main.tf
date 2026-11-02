@@ -13,6 +13,11 @@ variable "node_management" {
   default = "self_managed"
 }
 
+variable "install_efa_userspace" {
+  type    = bool
+  default = true
+}
+
 locals {
   system_userdata = templatefile("${path.module}/../../modules/eks-system-nodegroup/templates/userdata.sh.tpl", {
     cluster_name                 = "test-cluster"
@@ -35,7 +40,7 @@ locals {
     local_lvm_mount              = "/mnt/scratch"
     local_lvm_fs                 = "xfs"
     local_lvm_stripe_kb          = "256"
-    install_efa_userspace        = true
+    install_efa_userspace        = var.install_efa_userspace
     efa_installer_version        = "1.48.0"
     ebs_data_disk_detect_snippet = "detect_ebs_data_disk() { echo /dev/xvdb; }"
     node_management              = var.node_management
@@ -193,4 +198,27 @@ output "karpenter_unsafe_lsblk_awk_count" {
 # (`if ! systemctl restart containerd`) rather than a bare restart.
 output "gpu_guarded_restart_count" {
   value = length(regexall("if[[:space:]]*![[:space:]]*systemctl[[:space:]]+restart[[:space:]]+containerd", local.gpu_boothook))
+}
+
+# EFA userspace version alignment — the GPU boothook must install the host
+# EFA userspace from the SAME aws-efa-installer release as the AMI's EFA kmod
+# (read from /opt/amazon/efa_installed_packages), GPG-verify the tarball
+# against the pinned AWS EFA key fingerprint, keep the AMI's kmod
+# (--skip-kmod, never --minimal), and never hide the installer's exit code
+# behind a `| tail` pipe.
+output "gpu_efa_reads_ami_record_count" {
+  value = length(regexall("(?m)^[[:space:]]*EFA_PKGS_RECORD=/opt/amazon/efa_installed_packages$", local.gpu_boothook))
+}
+output "gpu_efa_installer_skip_kmod_count" {
+  value = length(regexall("(?m)^[[:space:]]*\\./efa_installer\\.sh[^\n]*--skip-kmod", local.gpu_boothook))
+}
+output "gpu_efa_installer_minimal_count" {
+  value = length(regexall("(?m)^[[:space:]]*\\./efa_installer\\.sh[^\n]*--minimal", local.gpu_boothook))
+}
+output "gpu_efa_installer_tail_pipe_count" {
+  value = length(regexall("efa_installer\\.sh[^\n]*\\|[[:space:]]*tail", local.gpu_boothook))
+}
+# Real invocations only (a line whose first token is ./efa_installer.sh).
+output "gpu_efa_installer_invocation_count" {
+  value = length(regexall("(?m)^[[:space:]]*\\./efa_installer\\.sh", local.gpu_boothook))
 }

@@ -148,6 +148,36 @@ run "self_managed_render" {
     condition     = output.gpu_guarded_restart_count >= 1
     error_message = "gpu boothook must guard `systemctl restart containerd` (use `if ! systemctl restart containerd`) — a bare restart under set -e would abort bringup with containerd stopped (node NotReady)."
   }
+
+  # --- EFA userspace follows the AMI's installer release ---
+  # 13. version comes from the AMI's own installer record, so the EFA kmod,
+  #     rdma-core and libfabric always come from one release.
+  assert {
+    condition     = output.gpu_efa_reads_ami_record_count == 1 && strcontains(output.gpu_boothook, "s/^# EFA installer version:")
+    error_message = "gpu boothook must read the EFA installer version from the AMI record /opt/amazon/efa_installed_packages (keeps kmod/rdma-core/libfabric on one release)."
+  }
+  # 14. the pinned variable is only the fallback, and is rendered as such.
+  assert {
+    condition     = strcontains(output.gpu_boothook, "EFA_FALLBACK_VERSION=\"1.48.0\"")
+    error_message = "gpu boothook must render efa_installer_version as EFA_FALLBACK_VERSION (used only when the AMI has no record)."
+  }
+  # 15. tarball must be GPG-verified against the AWS EFA key fingerprint
+  #     (AWS EFA docs) before the installer runs.
+  assert {
+    condition     = strcontains(output.gpu_boothook, "VALIDSIG .* 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$")
+    error_message = "gpu boothook must verify the EFA tarball signature against fingerprint 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC."
+  }
+  # 16. keep the AMI's kmod: exactly one invocation, with --skip-kmod and
+  #     never --minimal (which would drop libfabric-aws / openmpi5-aws).
+  assert {
+    condition     = output.gpu_efa_installer_invocation_count == 1 && output.gpu_efa_installer_skip_kmod_count == 1 && output.gpu_efa_installer_minimal_count == 0
+    error_message = "gpu boothook must invoke ./efa_installer.sh exactly once, with --skip-kmod and without --minimal."
+  }
+  # 17. the installer's exit code must not be masked by a `| tail` pipe.
+  assert {
+    condition     = output.gpu_efa_installer_tail_pipe_count == 0
+    error_message = "gpu boothook must not pipe efa_installer.sh into tail (the pipeline status would be tail's, hiding installer failures)."
+  }
 }
 
 run "managed_render" {
@@ -194,5 +224,24 @@ run "managed_render" {
   assert {
     condition     = strcontains(output.gpu_userdata, "SystemdCgroup = true")
     error_message = "gpu NodeConfig must pin SystemdCgroup=true in managed mode too."
+  }
+}
+
+run "efa_userspace_disabled" {
+  command = plan
+
+  variables {
+    install_efa_userspace = false
+  }
+
+  # install_efa_userspace=false must render no EFA userspace install at all.
+  assert {
+    condition     = output.gpu_efa_installer_invocation_count == 0 && output.gpu_efa_reads_ami_record_count == 0
+    error_message = "install_efa_userspace=false must not render the EFA userspace install block."
+  }
+  # The rest of bringup is unaffected.
+  assert {
+    condition     = output.gpu_nodeconfig_part_count == 1 && output.gpu_guarded_restart_count >= 1
+    error_message = "disabling EFA userspace must not change the rest of the gpu user-data."
   }
 }
