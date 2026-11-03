@@ -24,18 +24,36 @@
 
 set -euo pipefail
 
-VPC_ID="${1:?usage: list-vpc-endpoints.sh <vpc-id> <region>}"
-REGION="${2:?usage: list-vpc-endpoints.sh <vpc-id> <region>}"
+USAGE="usage: list-vpc-endpoints.sh <vpc-id> <region> <cluster-name>"
+VPC_ID="${1:?$USAGE}"
+REGION="${2:?$USAGE}"
+CLUSTER_NAME="${3:?$USAGE}"
 
 # Pull every endpoint in the VPC (Interface + Gateway, all states).
 # Filter to the "alive" subset client-side. --no-cli-pager so terraform
 # captures pure JSON.
+#
+# Endpoints created by THIS stack are dropped here: otherwise the second
+# plan sees them as pre-existing, removes them from the create set, and
+# Terraform destroys every endpoint it owns. Ownership = the exact Name tag
+# the module assigns ("<cluster>-<service>-endpoint" for Interface,
+# "<cluster>-s3-gateway-endpoint" for the S3 Gateway).
 ENDPOINTS_JSON=$(
   aws ec2 describe-vpc-endpoints \
     --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \
-    --query 'VpcEndpoints[].[VpcEndpointId,VpcEndpointType,ServiceName,State]' \
-    --output json
+    --query 'VpcEndpoints[].[VpcEndpointId,VpcEndpointType,ServiceName,State,Tags]' \
+    --output json \
+  | jq --arg cluster "$CLUSTER_NAME" --arg prefix "com.amazonaws.${REGION}." '
+      map(
+        .[1] as $type
+        | (.[2] | ltrimstr($prefix)) as $short
+        | (.[4] // []) as $tags
+        | (if $type == "Gateway" then ($cluster + "-s3-gateway-endpoint")
+           else ($cluster + "-" + $short + "-endpoint") end) as $our_name
+        | select(($tags | any(.Key == "Name" and .Value == $our_name)) | not)
+        | .[0:4]
+      )'
 )
 
 # Service-name prefix we care about (i.e. AWS-published services in this

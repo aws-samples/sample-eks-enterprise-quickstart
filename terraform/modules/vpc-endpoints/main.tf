@@ -94,8 +94,16 @@ locals {
 #     (aws_vpc_endpoints does not exist).
 # Output JSON is parsed into local.existing_* sets used to gate creation.
 # ---------------------------------------------------------------------
+#
+# Endpoints THIS stack created must not count as "existing": on the second
+# plan they'd be subtracted from interface_services_to_create and Terraform
+# would plan to DESTROY every endpoint it owns (hit live on a re-plan of a
+# greenfield private cluster). The script excludes endpoints carrying the
+# exact Name tag this module assigns ("<cluster>-<service>-endpoint" /
+# "<cluster>-s3-gateway-endpoint") — matching on the existing tag means
+# already-deployed stacks are recognised without any resource change.
 data "external" "existing_endpoints" {
-  program = ["bash", "${path.module}/scripts/list-vpc-endpoints.sh", var.vpc_id, var.region]
+  program = ["bash", "${path.module}/scripts/list-vpc-endpoints.sh", var.vpc_id, var.region, var.cluster_name]
 }
 
 locals {
@@ -168,6 +176,8 @@ resource "aws_vpc_endpoint" "interface" {
   private_dns_enabled = true
 
   tags = {
+    # Load-bearing: list-vpc-endpoints.sh recognises our own endpoints by
+    # this exact Name — changing it makes the next plan destroy them.
     Name = "${var.cluster_name}-${each.key}-endpoint"
   }
 
@@ -192,6 +202,7 @@ resource "aws_vpc_endpoint" "s3_gateway" {
   route_table_ids   = data.aws_route_tables.private.ids
 
   tags = {
+    # Load-bearing: see the Name tag note on aws_vpc_endpoint.interface.
     Name = "${var.cluster_name}-s3-gateway-endpoint"
   }
 }
