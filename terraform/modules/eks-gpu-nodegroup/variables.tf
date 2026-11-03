@@ -74,8 +74,28 @@ variable "gpu_nodegroups" {
     desired_capacity        = optional(number, 0)
     min_size                = optional(number, 0)
     max_size                = optional(number, 8)
+    containerd_storage      = optional(string) # ebs | instance_store; null = var.containerd_storage
   }))
   default = []
+
+  validation {
+    condition = alltrue([
+      for ng in var.gpu_nodegroups :
+      contains(["ebs", "instance_store"], ng.containerd_storage != null ? ng.containerd_storage : "ebs")
+    ])
+    error_message = "gpu_nodegroups[].containerd_storage must be \"ebs\" or \"instance_store\" (or omitted to use the module default)."
+  }
+
+  # nodeadm localStorage RAID0 claims EVERY Instance Store NVMe disk, so it
+  # cannot coexist with the local-LVM scratch volume (which stripes the same
+  # disks). Module-wide because enable_local_lvm is module-wide.
+  validation {
+    condition = !var.enable_local_lvm || alltrue([
+      for ng in var.gpu_nodegroups :
+      (ng.containerd_storage != null ? ng.containerd_storage : var.containerd_storage) == "ebs"
+    ])
+    error_message = "containerd_storage = \"instance_store\" (nodeadm localStorage RAID0 over all Instance Store NVMe disks) is mutually exclusive with enable_local_lvm / gpu_enable_local_lvm (the scratch LVM stripes the same disks). Set gpu_enable_local_lvm = false; with instance_store, emptyDir volumes already land on the NVMe RAID, or use hostPath under /mnt/k8s-disks/0/."
+  }
 
   # Module is conditionally instantiated by root via `count = install_gpu_nodegroups ? 1 : 0`.
   # If the module exists we require at least one nodegroup — empty list is meaningless.
@@ -253,4 +273,15 @@ variable "extra_asg_tags" {
   type        = map(string)
   default     = {}
   description = "Extra tags applied to every self-managed GPU ASG (e.g. cost-allocation tags Owner / CostCenter / Environment). Ignored when node_management = \"managed\" — for managed NGs, attach tags via aws_eks_node_group.tags upstream."
+}
+
+variable "containerd_storage" {
+  type        = string
+  default     = "ebs"
+  description = "Default /var/lib/containerd backing store for nodegroups that don't set gpu_nodegroups[].containerd_storage: \"ebs\" (dedicated gp3 data volume + LVM, migrated by the boothook) or \"instance_store\" (nodeadm localStorage RAID0 over all Instance Store NVMe disks; no data EBS volume; ephemeral). See the root variable gpu_containerd_storage."
+
+  validation {
+    condition     = contains(["ebs", "instance_store"], var.containerd_storage)
+    error_message = "containerd_storage must be \"ebs\" or \"instance_store\"."
+  }
 }

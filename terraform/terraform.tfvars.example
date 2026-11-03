@@ -199,7 +199,22 @@ gpu_nodegroups = [
   #   subnet_ids              = ["subnet-ccccccccccccccccc"]
   #   capacity_reservation_id = "cr-yyyyyyyyyyyyyyyyy"
   # },
+
+  # p5 with containerd on Instance Store NVMe (nodeadm localStorage RAID0)
+  # instead of a gp3 data volume. Requires gpu_enable_local_lvm = false.
+  # {
+  #   gpu_type           = "p5.48xlarge"
+  #   purchase_option    = "od"
+  #   suffix             = "-nvme"
+  #   containerd_storage = "instance_store"
+  # },
 ]
+
+# Default containerd backing store for GPU nodegroups that don't set
+# containerd_storage: "ebs" (gp3 data volume + LVM) or "instance_store"
+# (nodeadm localStorage RAID0 over all NVMe; ephemeral; no data volume;
+# mutually exclusive with gpu_enable_local_lvm). See terraform/README.md.
+# gpu_containerd_storage = "ebs"
 
 # =====================================================================
 # Tagging

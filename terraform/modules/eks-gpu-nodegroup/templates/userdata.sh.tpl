@@ -55,6 +55,7 @@ if [ -n "$SUPPORTED_LIST" ] && lspci -n -d 10de: 2>/dev/null | grep -qi "2c3a"; 
   fi
 fi
 
+%{ if containerd_storage == "ebs" ~}
 echo "=== Starting GPU Node LVM Setup ==="
 
 # containerd MUST start exactly once, on the final LV. The AMI's containerd
@@ -152,6 +153,18 @@ echo "Unmasking containerd"
 systemctl unmask containerd
 
 echo "=== LVM Setup Complete ==="
+%{ else ~}
+# containerd_storage = "instance_store" (issue #12): no data EBS volume and no
+# hand-rolled migration here. The NodeConfig part below sets
+# spec.instance.localStorage.strategy=RAID0, so the AMI's nodeadm-run.service
+# (which runs AFTER this boothook) executes setup-local-disks: RAID0 over all
+# Instance Store NVMe disks, stop containerd + kubelet, `cp -a` /var/lib/containerd
+# (incl. the pre-cached localhost/kubernetes/pause, awslabs/amazon-eks-ami#2000),
+# /var/lib/kubelet and /var/log/pods onto it, bind-mount them back, restart.
+# containerd keeps running on the root volume until then — not masked, so the
+# SystemdCgroup reload below can still (re)start it.
+echo "=== containerd storage: Instance Store (nodeadm localStorage RAID0, applied by nodeadm-run) ==="
+%{ endif ~}
 
 # ============================================================
 # Local Instance Store LVM (ephemeral scratch)
@@ -447,6 +460,11 @@ spec:
     apiServerEndpoint: ${cluster_endpoint}
     certificateAuthority: ${cluster_ca}
     cidr: ${service_ipv4_cidr}
+%{ if containerd_storage == "instance_store" ~}
+  instance:
+    localStorage:
+      strategy: RAID0
+%{ endif ~}
 %{ if node_management == "self_managed" ~}
   kubelet:
     flags:

@@ -179,6 +179,12 @@ run "self_managed_render" {
     condition     = output.gpu_efa_installer_invocation_count == 1 && output.gpu_efa_installer_skip_kmod_count == 1 && output.gpu_efa_installer_minimal_count == 0
     error_message = "gpu boothook must invoke ./efa_installer.sh exactly once, with --skip-kmod and without --minimal."
   }
+  # 18. default containerd_storage (ebs) keeps the boothook migration and does
+  #     NOT hand containerd to nodeadm localStorage.
+  assert {
+    condition     = output.gpu_nodeconfig_local_storage_strategy == "" && output.gpu_mask_containerd_count >= 1 && output.gpu_rsync_migration_count >= 1
+    error_message = "containerd_storage=ebs must keep the boothook LVM migration (mask + rsync) and must not set NodeConfig localStorage."
+  }
   # 17. the installer's exit code must not be masked by a `| tail` pipe.
   assert {
     condition     = output.gpu_efa_installer_tail_pipe_count == 0
@@ -249,5 +255,35 @@ run "efa_userspace_disabled" {
   assert {
     condition     = output.gpu_nodeconfig_part_count == 1 && output.gpu_guarded_restart_count >= 1
     error_message = "disabling EFA userspace must not change the rest of the gpu user-data."
+  }
+}
+
+run "gpu_containerd_instance_store" {
+  command = plan
+
+  variables {
+    containerd_storage = "instance_store"
+    enable_local_lvm   = false
+  }
+
+  # nodeadm localStorage owns containerd: RAID0 in the NodeConfig part, and
+  # the boothook must NOT run its own EBS migration (it would mask containerd
+  # and wait for a data disk that isn't attached in this mode).
+  assert {
+    condition     = output.gpu_nodeconfig_local_storage_strategy == "RAID0"
+    error_message = "instance_store must set NodeConfig spec.instance.localStorage.strategy = RAID0 (parsed from the node.eks.aws part)."
+  }
+  assert {
+    condition     = output.gpu_mask_containerd_count == 0 && output.gpu_rsync_migration_count == 0
+    error_message = "instance_store must not render the boothook EBS migration (mask containerd / rsync)."
+  }
+  # The rest of bringup is unaffected.
+  assert {
+    condition     = output.gpu_nodeconfig_part_count == 1 && output.gpu_manual_nodeadm_init_count == 0
+    error_message = "instance_store must keep exactly one standalone node.eks.aws part and no manual nodeadm init."
+  }
+  assert {
+    condition     = output.gpu_guarded_restart_count >= 1 && output.gpu_efa_installer_invocation_count == 1
+    error_message = "instance_store must keep the guarded containerd reload and the EFA userspace install."
   }
 }

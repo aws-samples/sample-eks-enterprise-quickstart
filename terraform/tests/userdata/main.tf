@@ -18,6 +18,16 @@ variable "install_efa_userspace" {
   default = true
 }
 
+variable "containerd_storage" {
+  type    = string
+  default = "ebs"
+}
+
+variable "enable_local_lvm" {
+  type    = bool
+  default = true
+}
+
 locals {
   system_userdata = templatefile("${path.module}/../../modules/eks-system-nodegroup/templates/userdata.sh.tpl", {
     cluster_name                 = "test-cluster"
@@ -34,7 +44,7 @@ locals {
     cluster_endpoint             = "https://ABC.gr7.us-east-1.eks.amazonaws.com"
     cluster_ca                   = "LS0tLS1CRUdJTg=="
     service_ipv4_cidr            = "172.20.0.0/16"
-    enable_local_lvm             = true
+    enable_local_lvm             = var.enable_local_lvm
     local_lvm_vg_name            = "vg_local"
     local_lvm_lv_name            = "lv_scratch"
     local_lvm_mount              = "/mnt/scratch"
@@ -46,6 +56,7 @@ locals {
     node_management              = var.node_management
     extra_node_labels            = var.node_management == "self_managed" ? "workload-type=gpu,gpu-instance-type=p5.48xlarge,purchase-option=od" : ""
     node_taints                  = var.node_management == "self_managed" ? "nvidia.com/gpu=true:NoSchedule" : ""
+    containerd_storage           = var.containerd_storage
   })
 
   # The body of the cloud-boothook part only — i.e. everything BEFORE the
@@ -239,4 +250,20 @@ output "gpu_efa_gpg_keyring_verify_count" {
 }
 output "gpu_efa_gpg_dearmor_count" {
   value = length(regexall("gpg --batch --yes --dearmor -o \"\\$EFA_WORKDIR/efa-keyring\\.gpg\"", local.gpu_boothook))
+}
+
+# containerd storage (issue #12). The NodeConfig YAML is decoded from the
+# standalone node.eks.aws MIME part so the assertion checks real structure,
+# not just a substring.
+locals {
+  gpu_nodeconfig_yaml = element(split("\n--==BOUNDARY==--", element(split("\n---\n", element(split("Content-Type: application/node.eks.aws", local.gpu_userdata), 1)), 1)), 0)
+}
+output "gpu_nodeconfig_local_storage_strategy" {
+  value = try(yamldecode(local.gpu_nodeconfig_yaml).spec.instance.localStorage.strategy, "")
+}
+output "gpu_mask_containerd_count" {
+  value = length(regexall("(?m)^systemctl mask containerd$", local.gpu_boothook))
+}
+output "gpu_rsync_migration_count" {
+  value = length(regexall("rsync[[:space:]]+-aHAX", local.gpu_boothook))
 }

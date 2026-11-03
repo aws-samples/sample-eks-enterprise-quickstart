@@ -412,9 +412,36 @@ variable "gpu_nodegroups" {
     desired_capacity        = optional(number, 0)
     min_size                = optional(number, 0)
     max_size                = optional(number, 8)
+    containerd_storage      = optional(string) # ebs | instance_store; null = gpu_containerd_storage
   }))
   description = "Explicit list of GPU nodegroups to create. Replaces the bash DEPLOY_GPU_OD/SPOT/ODCR/CB toggles with declarative entries."
   default     = []
+}
+
+variable "gpu_containerd_storage" {
+  type        = string
+  description = <<-EOT
+    Default backing store for /var/lib/containerd on GPU nodes; override per
+    nodegroup with gpu_nodegroups[].containerd_storage.
+      "ebs"            (default) — a dedicated gp3 data volume
+                       (gpu_node_data_volume_size), LVM, containerd migrated by
+                       the node boothook. Survives stop/start.
+      "instance_store" — the EKS AMI's native nodeadm localStorage RAID0 over
+                       ALL Instance Store NVMe disks; /var/lib/containerd,
+                       /var/lib/kubelet (so emptyDir) and /var/log/pods move
+                       onto it. No data EBS volume is attached. Ephemeral: the
+                       content is lost on stop/start or replacement (images
+                       re-pull). Requires an instance type with Instance Store
+                       and is mutually exclusive with gpu_enable_local_lvm
+                       (RAID0 takes every NVMe disk) — use emptyDir or
+                       hostPath under /mnt/k8s-disks/0/ for scratch instead.
+  EOT
+  default     = "ebs"
+
+  validation {
+    condition     = contains(["ebs", "instance_store"], var.gpu_containerd_storage)
+    error_message = "gpu_containerd_storage must be \"ebs\" or \"instance_store\"."
+  }
 }
 
 variable "gpu_node_root_volume_size" {
