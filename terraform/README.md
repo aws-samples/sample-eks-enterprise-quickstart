@@ -233,6 +233,35 @@ registered:
 Anything else falls back to `{ efa_only_count = 0, primary_efa = false }`
 — LT will provision a plain ENA NIC and skip EFA scaffolding.
 
+### containerd storage: EBS or Instance Store
+
+Where `/var/lib/containerd` lives on GPU nodes is selectable — module-wide
+via `gpu_containerd_storage`, or per entry via
+`gpu_nodegroups[].containerd_storage` (which wins):
+
+| | `"ebs"` (default) | `"instance_store"` |
+|---|---|---|
+| Backing | dedicated gp3 data volume (`gpu_node_data_volume_size`) + LVM | Instance Store NVMe, RAID0 over **all** local disks |
+| Done by | this repo's boothook (mask → wait-for-exit → fail-fast rsync → sync → unmask) | the AMI's nodeadm (`spec.instance.localStorage.strategy: RAID0` → `setup-local-disks` in `nodeadm-run`) |
+| Also moved | — | `/var/lib/kubelet` (so `emptyDir`), `/var/log/pods` |
+| Data EBS volume | attached | **not** attached |
+| Survives stop/start | yes | **no** — images re-pull on the replacement/restarted node |
+| Local-LVM scratch (`gpu_enable_local_lvm`) | available | **mutually exclusive** (RAID0 takes every NVMe disk) — use `emptyDir` (already on the NVMe RAID) or `hostPath` under `/mnt/k8s-disks/0/` |
+| Instance types | any | must have Instance Store (checked at plan time) |
+
+```hcl
+gpu_enable_local_lvm = false                 # required for instance_store
+gpu_nodegroups = [
+  { gpu_type = "p5.48xlarge", purchase_option = "od", containerd_storage = "instance_store" },
+  { gpu_type = "p5.48xlarge", purchase_option = "spot" },   # → gpu_containerd_storage (ebs)
+]
+```
+
+Switching an existing nodegroup changes its Launch Template (userdata +
+block devices), so nodes roll on the next apply. Not supported by the
+legacy bash flow (Terraform only). System and Karpenter nodes always use
+the EBS path.
+
 ## GPU K8s stack (`eks-gpu-stack`)
 
 The K8s-side components live in a separate module so the stack can be

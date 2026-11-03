@@ -170,6 +170,7 @@ module "eks_gpu_nodegroup" {
   install_efa_userspace = var.gpu_install_efa_userspace
   efa_installer_version = var.gpu_efa_installer_version
   enable_local_lvm      = var.gpu_enable_local_lvm
+  containerd_storage    = var.gpu_containerd_storage
   local_lvm_mount       = var.gpu_local_lvm_mount
   local_lvm_fs          = var.gpu_local_lvm_fs
   ec2_key_name          = var.ec2_key_name

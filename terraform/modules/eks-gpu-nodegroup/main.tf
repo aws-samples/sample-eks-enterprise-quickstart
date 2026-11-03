@@ -287,6 +287,19 @@ locals {
     for k, ng in local.nodegroups_map : k => "nvidia.com/gpu=true:NoSchedule"
   }
 
+  # Per-NG /var/lib/containerd backing store (issue #12):
+  #   "ebs"            — dedicated gp3 data volume (/dev/xvdb) + LVM, migrated
+  #                      by the boothook (mask → wait-for-exit → fail-fast
+  #                      rsync → sync → unmask).
+  #   "instance_store" — the AMI's own nodeadm localStorage RAID0 over all
+  #                      Instance Store NVMe disks (setup-local-disks, run in
+  #                      nodeadm-run AFTER this boothook: stops containerd +
+  #                      kubelet, cp -a the state dirs incl. the pre-cached
+  #                      pause image, bind-mounts them back). No data volume.
+  ng_containerd_storage = {
+    for k, ng in local.nodegroups_map : k => (ng.containerd_storage != null ? ng.containerd_storage : var.containerd_storage)
+  }
+
   userdata = {
     for k, ng in local.nodegroups_map : k => templatefile("${path.module}/templates/userdata.sh.tpl", {
       cluster_name                 = var.cluster_name
@@ -305,6 +318,7 @@ locals {
       node_management              = var.node_management
       extra_node_labels            = local.ng_extra_node_labels[k]
       node_taints                  = local.ng_node_taints[k]
+      containerd_storage           = local.ng_containerd_storage[k]
     })
   }
 }
@@ -411,15 +425,21 @@ resource "aws_launch_template" "gpu" {
     }
   }
 
-  block_device_mappings {
-    device_name = "/dev/xvdb"
-    ebs {
-      volume_size           = var.data_volume_size
-      volume_type           = "gp3"
-      iops                  = 3000
-      throughput            = 125
-      encrypted             = true
-      delete_on_termination = true
+  # containerd data volume — only for containerd_storage = "ebs". With
+  # "instance_store" nodeadm puts containerd on the NVMe RAID0 instead, so an
+  # extra gp3 volume would just be paid-for dead weight.
+  dynamic "block_device_mappings" {
+    for_each = local.ng_containerd_storage[each.key] == "ebs" ? [1] : []
+    content {
+      device_name = "/dev/xvdb"
+      ebs {
+        volume_size           = var.data_volume_size
+        volume_type           = "gp3"
+        iops                  = 3000
+        throughput            = 125
+        encrypted             = true
+        delete_on_termination = true
+      }
     }
   }
 
@@ -461,6 +481,16 @@ resource "aws_launch_template" "gpu" {
     tags = {
       Name                                        = "${var.cluster_name}-gpu-${replace(each.value.gpu_type, ".", "-")}-volume"
       "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+    }
+  }
+
+  lifecycle {
+    # setup-local-disks exits 0 ("no NVMe instance storage disks found!") on a
+    # type without Instance Store, which would silently leave containerd on the
+    # small root volume. Fail at plan time instead.
+    precondition {
+      condition     = local.ng_containerd_storage[each.key] != "instance_store" || data.aws_ec2_instance_type.gpu[each.value.gpu_type].instance_storage_supported
+      error_message = "gpu_nodegroups entry ${each.key}: containerd_storage = \"instance_store\" but ${each.value.gpu_type} has no Instance Store. Use containerd_storage = \"ebs\" for this nodegroup."
     }
   }
 }
