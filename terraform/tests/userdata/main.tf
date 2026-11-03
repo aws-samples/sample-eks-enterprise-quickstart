@@ -222,3 +222,21 @@ output "gpu_efa_installer_tail_pipe_count" {
 output "gpu_efa_installer_invocation_count" {
   value = length(regexall("(?m)^[[:space:]]*\\./efa_installer\\.sh", local.gpu_boothook))
 }
+
+# EFA tarball verification must work on AL2023's gnupg2-minimal: no
+# gpg-agent (so `gpg --import` fails), no gpgv, no --trust-model. The
+# boothook verifies against a dearmored keyring file instead (hit live: the
+# --import form left nodes without the EFA userspace).
+output "gpu_efa_gpg_import_count" {
+  # (?m)^[^#\n]* — real command lines only, not the explanatory comment.
+  value = length(regexall("(?m)^[^#\n]*gpg[^\n]*--import", local.gpu_boothook))
+}
+output "gpu_efa_gpg_trust_model_count" {
+  value = length(regexall("(?m)^[^#\n]*gpg[^\n]*--trust-model", local.gpu_boothook))
+}
+output "gpu_efa_gpg_keyring_verify_count" {
+  value = length(regexall("gpg --batch --no-default-keyring --keyring \"\\$EFA_WORKDIR/efa-keyring\\.gpg\"", local.gpu_boothook))
+}
+output "gpu_efa_gpg_dearmor_count" {
+  value = length(regexall("gpg --batch --yes --dearmor -o \"\\$EFA_WORKDIR/efa-keyring\\.gpg\"", local.gpu_boothook))
+}
