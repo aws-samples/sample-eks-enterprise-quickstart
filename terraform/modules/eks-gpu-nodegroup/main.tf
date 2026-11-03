@@ -664,9 +664,16 @@ locals {
   # GPU count per nodegroup, used as scale-from-zero resource hint.
   # data.aws_ec2_instance_type populates .gpus[*].count for accelerator
   # types; non-GPU types fall back to "0".
+  # NOTE: `gpus` is a SET in the provider schema, so gpus[0] is not a valid
+  # index — the previous try(...gpus[0].count, 0) silently yielded 0 for
+  # every type, advertising nvidia.com/gpu=0 to Cluster Autoscaler.
   ng_gpu_count = {
     for k, ng in local.nodegroups_map :
-    k => try(data.aws_ec2_instance_type.gpu[ng.gpu_type].gpus[0].count, 0)
+    k => (
+      length(data.aws_ec2_instance_type.gpu[ng.gpu_type].gpus) > 0
+      ? sum([for g in data.aws_ec2_instance_type.gpu[ng.gpu_type].gpus : g.count])
+      : 0
+    )
   }
 }
 
