@@ -385,15 +385,25 @@ setup_alb_controller_pod_identity() {
     local namespace="kube-system"
     local service_account="aws-load-balancer-controller"
 
-    # 1. 下载 IAM policy（如果不存在）
-    local policy_file="${PROJECT_ROOT}/terraform/assets/iam/alb-controller-iam-policy.json"
-    if [ ! -f "${policy_file}" ]; then
-        log "Downloading AWS Load Balancer Controller IAM policy (${ALB_CONTROLLER_VERSION})..."
-        mkdir -p "$(dirname "${policy_file}")"
-        curl -sS -o "${policy_file}" "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${ALB_CONTROLLER_VERSION}/docs/install/iam_policy.json"
-        log "✓ Policy downloaded to ${policy_file}"
+    # 1. 获取与 ALB_CONTROLLER_VERSION 精确匹配的 IAM policy
+    #    优先用仓库内置副本（与 Terraform file 模式共用，离线可用）；没有该版本
+    #    时才从上游 release tag 下载到临时文件（-f：HTTP 错误直接失败，不会把
+    #    404 页面当成 policy）。不再缓存到 terraform/assets/ —— 旧的未带版本号
+    #    的缓存会在升级 ALB_CONTROLLER_VERSION 后被继续沿用。
+    #    （本脚本的 ARN 均为 arn:aws:，只支持商业 partition，故固定 iam_policy.json）
+    local policy_file="${PROJECT_ROOT}/terraform/assets/iam/alb-controller/${ALB_CONTROLLER_VERSION}/iam_policy.json"
+    local policy_tmp=""
+    if [ -f "${policy_file}" ]; then
+        log "Using bundled AWS Load Balancer Controller IAM policy: ${policy_file}"
     else
-        log "Policy file already exists, using existing file"
+        log "No bundled IAM policy for ${ALB_CONTROLLER_VERSION}; downloading from upstream..."
+        policy_tmp=$(mktemp "${TMPDIR:-/tmp}/alb-controller-iam-policy.XXXXXX")
+        if ! curl -fsSL -o "${policy_tmp}" "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${ALB_CONTROLLER_VERSION}/docs/install/iam_policy.json"; then
+            rm -f "${policy_tmp}"
+            error "Failed to download IAM policy for ALB controller ${ALB_CONTROLLER_VERSION} (offline? add terraform/assets/iam/alb-controller/${ALB_CONTROLLER_VERSION}/iam_policy.json)"
+        fi
+        policy_file="${policy_tmp}"
+        log "✓ Policy downloaded"
     fi
 
     # 2. 创建 IAM 角色
@@ -401,6 +411,9 @@ setup_alb_controller_pod_identity() {
 
     # 3. 创建和附加自定义策略
     attach_custom_policy "${role_name}" "${policy_name}" "file://${policy_file}"
+    if [ -n "${policy_tmp}" ]; then
+        rm -f "${policy_tmp}"
+    fi
 
     # 4. 创建 ServiceAccount（Helm chart 会创建，但我们先创建以确保存在）
     create_service_account "${namespace}" "${service_account}"
