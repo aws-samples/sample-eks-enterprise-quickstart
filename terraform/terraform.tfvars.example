@@ -75,6 +75,14 @@ node_management = "self_managed"
 # cluster_autoscaler_version       = ""    # empty = auto from k8s_version → CA matrix
 # cluster_autoscaler_chart_version = ""    # empty = auto from k8s_version → chart matrix
 
+# Pod Identity associations are eventually consistent. Pods admitted right
+# after an association is created can miss the credential env and fall back
+# to the node role (AccessDenied — cluster-autoscaler then CrashLoops). Every
+# Pod Identity consumer (CA, ALB controller, CSI controllers, Karpenter)
+# waits this long after its association is created/replaced; steady-state
+# applies don't wait. "0s" disables.
+# pod_identity_propagation_wait = "30s"
+
 # =====================================================================
 # Cluster API access (private clusters only — leave empty for public)
 # =====================================================================

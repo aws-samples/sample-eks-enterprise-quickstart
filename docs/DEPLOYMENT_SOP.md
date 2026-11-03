@@ -431,6 +431,22 @@ kubectl get pods -n kube-system -l app.kubernetes.io/name=eks-pod-identity-agent
 aws eks list-pod-identity-associations --cluster-name ${CLUSTER_NAME} --region ${AWS_REGION}
 ```
 
+**症状：association 和 IAM role 都正确，但组件报 AccessDenied，且报错里的 caller 是节点 role（`assumed-role/EKSNodeRole-...`）**
+（典型：首次部署后 cluster-autoscaler 一直 CrashLoopBackOff，日志 `not authorized to perform: autoscaling:DescribeAutoScalingGroups`）
+
+原因：Pod Identity association 是最终一致的，凭证环境变量由 EKS 控制面 webhook 在 **pod 创建时**注入。pod 若在 association 生效前创建，就永远没有 `AWS_CONTAINER_CREDENTIALS_FULL_URI`，SDK 回退到节点 role。CrashLoop 只重启容器、不重建 pod，所以不会自愈。Terraform / bash 流程在新建 association 后会先等待 `pod_identity_propagation_wait` / `POD_IDENTITY_PROPAGATION_WAIT`（默认 30 秒）再部署 pod 来规避（issue #2）；若仍遇到，重建 pod 即可：
+
+```bash
+# 确认 pod 是否有 Pod Identity 注入的环境变量（冒号后为空 = 缺失）
+kubectl get pod -n kube-system -l app.kubernetes.io/name=aws-cluster-autoscaler \
+  -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.containers[0].env[?(@.name=="AWS_CONTAINER_CREDENTIALS_FULL_URI")].value}{"\n"}{end}'
+
+# 重建 pod（其他组件替换 deployment 名称，如 aws-load-balancer-controller / karpenter / ebs-csi-controller）
+kubectl rollout restart deployment cluster-autoscaler -n kube-system
+```
+
+如果经常遇到，可调大 `pod_identity_propagation_wait`（如 `"1m"`）。
+
 ---
 
 ## 堡垒机管理

@@ -326,6 +326,20 @@ resource "aws_eks_pod_identity_association" "karpenter" {
   depends_on = [kubernetes_service_account_v1.karpenter]
 }
 
+# Pod Identity propagation wait (issue #2). Associations are eventually
+# consistent; a Karpenter pod admitted before propagation never gets the
+# AWS_CONTAINER_* env and falls back to the node role (AccessDenied). See the
+# full rationale on time_sleep.pod_identity_propagation in
+# modules/eks-addons/main.tf. Re-runs only when the association is created
+# or replaced.
+resource "time_sleep" "pod_identity_propagation" {
+  create_duration = var.pod_identity_propagation_wait
+
+  triggers = {
+    karpenter = aws_eks_pod_identity_association.karpenter.association_id
+  }
+}
+
 # =====================================================================
 # SQS interruption queue + EventBridge rules (spot/scheduled-change events)
 # =====================================================================
@@ -452,6 +466,7 @@ resource "helm_release" "karpenter" {
 
   depends_on = [
     aws_eks_pod_identity_association.karpenter,
+    time_sleep.pod_identity_propagation,
     aws_iam_role_policy.karpenter_controller,
   ]
 }

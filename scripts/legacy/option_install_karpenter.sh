@@ -591,6 +591,9 @@ if [ -z "$EXISTING_ASSOCIATION" ]; then
         --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/${KARPENTER_CONTROLLER_ROLE}" \
         --region "${AWS_REGION}"
     echo "  ✓ Pod Identity Association created successfully"
+    # Associations are eventually consistent — don't let the Karpenter pods
+    # below be admitted before it propagates (issue #2). Helper sourced above.
+    wait_for_pod_identity_propagation
 else
     echo "  Pod Identity Association already exists (ID: ${EXISTING_ASSOCIATION})"
 fi

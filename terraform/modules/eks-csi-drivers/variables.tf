@@ -28,3 +28,9 @@ variable "s3_bucket_arns" {
 }
 variable "system_node_label_key" { type = string }
 variable "system_node_label_value" { type = string }
+
+variable "pod_identity_propagation_wait" {
+  type        = string
+  default     = "30s"
+  description = "How long to wait after creating/replacing this module's EKS Pod Identity associations before deploying the pods that use them (time_sleep create_duration, e.g. \"30s\", \"1m\"). Associations are eventually consistent; a pod admitted before propagation never gets the AWS_CONTAINER_* env and falls back to the node role (issue #2)."
+}
