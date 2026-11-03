@@ -9,7 +9,7 @@
 #     - node-problem-detector (helm)
 #     - gpu-health-check (kubernetes_daemon_set + RBAC)
 #   stack_mode=operator
-#     - nvidia/gpu-operator (helm; driver/toolkit/mofed disabled)
+#     - nvidia/gpu-operator (helm; driver/toolkit/RDMA disabled)
 #     - aws-efa-k8s-device-plugin (still installed by us)
 # =====================================================================
 
@@ -109,12 +109,6 @@ variable "gpu_operator_toolkit_enabled" {
   type        = bool
   default     = false
   description = "Operator's containerized toolkit. EKS GPU AMI ships nvidia-container-toolkit; keep false."
-}
-
-variable "gpu_operator_mofed_enabled" {
-  type        = bool
-  default     = false
-  description = "Operator's MOFED driver. AWS EFA plugin owns /dev/infiniband/uverbs*; keep false."
 }
 
 variable "gpu_operator_mig_strategy" {

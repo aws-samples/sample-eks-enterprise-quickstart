@@ -257,7 +257,7 @@ responsibility:
 **Layer 2 — `terraform/modules/eks-gpu-stack/` (K8s workloads; legacy: `scripts/legacy/option_install_gpu_stack.sh`)**
 - Two mutually-exclusive modes via `gpu_stack_mode` (terraform) / `GPU_STACK_MODE` (legacy):
   - `standard` (default): nvidia-device-plugin + EFA plugin + dcgm-exporter + node-problem-detector + gpu-health-check DS
-  - `operator`: NVIDIA GPU Operator (driver/toolkit/mofed disabled) + EFA plugin
+  - `operator`: NVIDIA GPU Operator (driver/toolkit/RDMA disabled) + EFA plugin
 - Terraform: switching mode triggers `terraform apply` to retire stale resources from the previous mode
 - Legacy: mode-switch protected by `GPU_STACK_FORCE_SWITCH=true` to auto-uninstall conflicting releases; auto-invoked from layer 1 by default; skip with `SKIP_GPU_STACK_AUTO_INSTALL=true`
 

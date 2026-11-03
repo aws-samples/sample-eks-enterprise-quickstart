@@ -10,7 +10,8 @@
 #     gpu-operator's plugin DS would advertise it)
 #   - port 9400 (helm dcgm-exporter vs Operator's nvidia-dcgm-exporter)
 #   - GFD labels (chart-internal GFD vs Operator's nvidia-gpu-feature-discovery)
-#   - /dev/infiniband/uverbs* (mofedDriver vs AWS EFA plugin)
+#   - /dev/infiniband/uverbs* (AWS EFA plugin is the sole owner; Operator's
+#     driver.rdma / nvidia-peermem path stays off)
 # =====================================================================
 
 locals {
@@ -377,8 +378,14 @@ resource "kubernetes_daemon_set_v1" "gpu_health_check" {
 # Critical flags:
 #   driver.enabled=false   — AMI ships the driver
 #   toolkit.enabled=false  — AMI ships nvidia-container-toolkit
-#   mofedDriver.enabled=false / driver.rdma.enabled=false — AWS EFA plugin
-#                            owns /dev/infiniband/uverbs*
+#   driver.rdma.enabled=false — driver.rdma only toggles the nvidia-peermem
+#                            sidecar of the Operator's driver DaemonSet
+#                            (MOFED/InfiniBand GPUDirect RDMA), which isn't
+#                            deployed at all while driver.enabled=false. On
+#                            AWS, GPUDirect RDMA over EFA uses the AMI's
+#                            efa-nv-peermem, and the AWS EFA plugin owns
+#                            /dev/infiniband/uverbs*. (The chart has no
+#                            top-level mofedDriver key — see #13.)
 #   migManager.enabled is on iff mig.strategy != none
 #   daemonsets.nodeSelector.workload-type=gpu — confine all Operator DS
 #                            to the same GPU nodes the rest of the stack uses
@@ -403,9 +410,6 @@ resource "helm_release" "gpu_operator" {
     }
     toolkit = {
       enabled = var.gpu_operator_toolkit_enabled
-    }
-    mofedDriver = {
-      enabled = var.gpu_operator_mofed_enabled
     }
     devicePlugin = {
       enabled = true

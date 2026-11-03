@@ -229,7 +229,7 @@ exclusive** modes via `gpu_stack_mode`:
 | Mode | What it installs |
 |---|---|
 | `standard` (default) | nvidia-device-plugin · aws-efa-k8s-device-plugin · dcgm-exporter · node-problem-detector · gpu-health-check DS |
-| `operator` | NVIDIA GPU Operator (driver/toolkit/mofed disabled to coexist with EKS GPU AMI + AWS EFA plugin) · aws-efa-k8s-device-plugin |
+| `operator` | NVIDIA GPU Operator (driver/toolkit/RDMA disabled to coexist with EKS GPU AMI + AWS EFA plugin) · aws-efa-k8s-device-plugin |
 
 Why mutual exclusion is enforced:
 
@@ -238,7 +238,7 @@ Why mutual exclusion is enforced:
 | `nvidia.com/gpu` | helm `nvidia-device-plugin` DS | Operator's plugin DS |
 | Port 9400 metrics | helm `dcgm-exporter` | Operator's `nvidia-dcgm-exporter` |
 | GFD labels | chart-internal GFD sidecar | Operator's GFD DS |
-| `/dev/infiniband/uverbs*` | AWS EFA plugin (sole owner) | mofedDriver (forced off) |
+| `/dev/infiniband/uverbs*` | AWS EFA plugin (sole owner) | AWS EFA plugin; Operator `driver.rdma` / nvidia-peermem forced off |
 
 Decision table:
 
