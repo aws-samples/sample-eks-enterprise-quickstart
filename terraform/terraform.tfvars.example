@@ -75,6 +75,13 @@ node_management = "self_managed"
 # cluster_autoscaler_version       = ""    # empty = auto from k8s_version → CA matrix
 # cluster_autoscaler_chart_version = ""    # empty = auto from k8s_version → chart matrix
 
+# AWS Load Balancer Controller IAM policy source. "http" (default) fetches
+# the upstream policy for alb_controller_app_version from GitHub; "file" uses
+# the bundled copy in assets/iam/alb-controller/<version>/ (air-gapped, or
+# GitHub.com blocked — e.g. China regions). Both pick the partition variant
+# (aws / aws-cn / aws-us-gov / aws-iso / aws-iso-b) automatically.
+# alb_controller_iam_policy_source = "file"
+
 # Pod Identity associations are eventually consistent. Pods admitted right
 # after an association is created can miss the credential env and fall back
 # to the node role (AccessDenied — cluster-autoscaler then CrashLoops). Every

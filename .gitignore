@@ -31,6 +31,8 @@ credentials.json
 eksctl_cluster_final.yaml
 eksctl_cluster_base_final.yaml
 eksctl_nodegroup_*.yaml
+# Stale download cache written by older legacy scripts (no longer written —
+# the bundled, versioned copies live in terraform/assets/iam/alb-controller/).
 terraform/assets/iam/alb-controller-iam-policy.json
 
 # Terraform

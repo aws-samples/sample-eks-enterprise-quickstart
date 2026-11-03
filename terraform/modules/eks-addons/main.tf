@@ -292,13 +292,37 @@ resource "helm_release" "cluster_autoscaler" {
 # from the repo-bundled JSON (for air-gapped environments / GitHub.com
 # blocked). Switch via var.alb_controller_iam_policy_source.
 #
+# Upstream publishes one policy document PER PARTITION (resource ARNs are
+# partition-qualified: arn:aws: / arn:aws-cn: / arn:aws-us-gov: ...). Using
+# the commercial iam_policy.json in China or GovCloud creates a policy whose
+# resource-scoped statements match nothing, so the matching variant is
+# picked from data.aws_partition in both modes.
+#
+# Bundled copies live in assets/iam/alb-controller/<app_version>/ under the
+# upstream file names (see the README there); add a directory per new tag.
+#
 # We don't add a postcondition on the http data source: a non-200 fail
 # would crash the plan rather than letting the operator switch to 'file'
 # mode. Empty/invalid responses surface later as aws_iam_policy validation
 # errors with the AWS-side message attached.
+locals {
+  alb_iam_policy_file_by_partition = {
+    "aws"        = "iam_policy.json"
+    "aws-cn"     = "iam_policy_cn.json"
+    "aws-us-gov" = "iam_policy_us-gov.json"
+    "aws-iso"    = "iam_policy_iso.json"
+    "aws-iso-b"  = "iam_policy_isob.json"
+  }
+  alb_iam_policy_file = lookup(local.alb_iam_policy_file_by_partition, data.aws_partition.current.partition, "")
+  alb_iam_policy_path = "${path.module}/../../assets/iam/alb-controller/${var.alb_controller_app_version}/${local.alb_iam_policy_file}"
+  alb_iam_policy_url  = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${var.alb_controller_app_version}/docs/install/${local.alb_iam_policy_file}"
+
+  alb_iam_policy_bundled = local.alb_iam_policy_file != "" && fileexists(local.alb_iam_policy_path)
+}
+
 data "http" "alb_iam_policy" {
-  count = var.alb_controller_iam_policy_source == "http" ? 1 : 0
-  url   = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${var.alb_controller_app_version}/docs/install/iam_policy.json"
+  count = var.alb_controller_iam_policy_source == "http" && local.alb_iam_policy_file != "" ? 1 : 0
+  url   = local.alb_iam_policy_url
 
   retry {
     attempts     = 3
@@ -309,14 +333,31 @@ data "http" "alb_iam_policy" {
 locals {
   alb_iam_policy_body = (
     var.alb_controller_iam_policy_source == "http"
-    ? data.http.alb_iam_policy[0].response_body
-    : file("${path.module}/../../assets/iam/alb-controller-iam-policy.json")
+    ? try(data.http.alb_iam_policy[0].response_body, "")
+    : (local.alb_iam_policy_bundled ? file(local.alb_iam_policy_path) : "")
   )
+  # file mode is fully known at plan time, so a missing/garbled bundled file
+  # is reported by the precondition below instead of a raw file() error.
+  # (http bodies are validated by IAM on create, per the note above.)
+  alb_iam_policy_file_ok = var.alb_controller_iam_policy_source != "file" || (local.alb_iam_policy_bundled && can(jsondecode(local.alb_iam_policy_body)))
 }
 
 resource "aws_iam_policy" "alb_controller" {
-  name   = "${var.cluster_name}-alb-controller-policy"
-  policy = local.alb_iam_policy_body
+  name = "${var.cluster_name}-alb-controller-policy"
+  # Placeholder only when a precondition below is about to fail the plan —
+  # keeps provider-side JSON validation from pre-empting the clear message.
+  policy = local.alb_iam_policy_file != "" && local.alb_iam_policy_file_ok ? local.alb_iam_policy_body : jsonencode({ Version = "2012-10-17", Statement = [] })
+
+  lifecycle {
+    precondition {
+      condition     = local.alb_iam_policy_file != ""
+      error_message = "No AWS Load Balancer Controller IAM policy variant is known for partition '${data.aws_partition.current.partition}'. Upstream ships iam_policy{,_cn,_us-gov,_iso,_isob}.json; add a mapping in alb_iam_policy_file_by_partition (modules/eks-addons/main.tf) for this partition."
+    }
+    precondition {
+      condition     = local.alb_iam_policy_file_ok
+      error_message = "alb_controller_iam_policy_source = \"file\" but no valid bundled policy at ${abspath(local.alb_iam_policy_path)}. Add it for alb_controller_app_version = ${var.alb_controller_app_version}: download ${local.alb_iam_policy_url} into that path (see the README.md in an existing version directory under assets/iam/alb-controller/), or use alb_controller_iam_policy_source = \"http\"."
+    }
+  }
 }
 
 resource "aws_iam_role" "alb_controller" {
