@@ -364,13 +364,19 @@ if [ ! -x /opt/amazon/efa/bin/fi_info ]; then
       echo "ERROR: failed to download $tarball (+ .sig / signing key) from $base"
       return 1
     fi
+    # AL2023 ships gnupg2-minimal: no gpg-agent (so `gpg --import` fails with
+    # "can't connect to the gpg-agent"), no gpgv, no --trust-model. Verify
+    # against a dearmored keyring file instead — neither step needs the agent.
+    # (The AMI build swaps in gnupg2-full for its import; we avoid a boot-time
+    # dnf dependency.) Verified on gnupg2-minimal 2.3.7 (AL2023 EKS AMI).
     mkdir -m 700 "$EFA_WORKDIR/gnupg" || return 1
-    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --quiet --import aws-efa-installer.key; then
-      echo "ERROR: failed to import the EFA signing key"
+    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --yes --dearmor -o "$EFA_WORKDIR/efa-keyring.gpg" aws-efa-installer.key; then
+      echo "ERROR: failed to read the EFA signing key"
       return 1
     fi
     # VALIDSIG's last field is the primary-key fingerprint of the signer.
-    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --status-fd 1 --verify "$tarball.sig" "$tarball" 2>/dev/null \
+    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --no-default-keyring --keyring "$EFA_WORKDIR/efa-keyring.gpg" \
+        --status-fd 1 --verify "$tarball.sig" "$tarball" 2>/dev/null \
         | grep -Eq '^\[GNUPG:\] VALIDSIG .* 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$'; then
       echo "ERROR: $tarball is not validly signed by the AWS EFA key — refusing to run the installer"
       return 1

@@ -167,6 +167,12 @@ run "self_managed_render" {
     condition     = strcontains(output.gpu_boothook, "VALIDSIG .* 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$")
     error_message = "gpu boothook must verify the EFA tarball signature against fingerprint 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC."
   }
+  # 15b. ...and the verification must not depend on gpg-agent / gpgv /
+  #      --trust-model, none of which exist in AL2023's gnupg2-minimal.
+  assert {
+    condition     = output.gpu_efa_gpg_dearmor_count == 1 && output.gpu_efa_gpg_keyring_verify_count == 1 && output.gpu_efa_gpg_import_count == 0 && output.gpu_efa_gpg_trust_model_count == 0
+    error_message = "gpu boothook must verify the EFA tarball via a dearmored keyring (gpg --dearmor + --no-default-keyring --keyring), never gpg --import / --trust-model (fail on AL2023 gnupg2-minimal: no gpg-agent)."
+  }
   # 16. keep the AMI's kmod: exactly one invocation, with --skip-kmod and
   #     never --minimal (which would drop libfabric-aws / openmpi5-aws).
   assert {
