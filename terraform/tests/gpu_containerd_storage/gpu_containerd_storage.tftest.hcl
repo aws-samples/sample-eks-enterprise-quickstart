@@ -16,6 +16,7 @@ mock_provider "aws" {
     defaults = {
       supported_architectures    = ["x86_64"]
       instance_storage_supported = true
+      gpus                       = [{ count = 8, manufacturer = "NVIDIA", memory_size = 81920, name = "H100" }]
     }
   }
   mock_data "aws_ssm_parameter" {
@@ -184,4 +185,26 @@ run "invalid_value_rejected" {
   }
 
   expect_failures = [var.gpu_nodegroups]
+}
+
+# Cluster Autoscaler scale-from-zero hint (self_managed ASGs). `gpus` is a set
+# in the provider schema; the old try(gpus[0].count, 0) always produced "0",
+# so CA was told every GPU node has nvidia.com/gpu=0 and never scaled a GPU
+# ASG up from zero for GPU-requesting pods.
+run "self_managed_ca_gpu_resource_hint" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-gpu-nodegroup"
+  }
+
+  variables {
+    node_management = "self_managed"
+  }
+
+  assert {
+    condition = one([for t in aws_autoscaling_group.gpu["p5-48xlarge-od"].tag : t.value
+    if t.key == "k8s.io/cluster-autoscaler/node-template/resources/nvidia.com/gpu"]) == "8"
+    error_message = "self_managed GPU ASG must advertise the real GPU count (8) to Cluster Autoscaler, not 0."
+  }
 }
