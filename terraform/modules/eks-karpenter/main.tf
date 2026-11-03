@@ -495,6 +495,172 @@ locals {
   ]
 }
 
+# =====================================================================
+# GPU NodePools (var.gpu_nodepools) — one EC2NodeClass + NodePool per entry
+#
+# Each pool pins ONE instance type because the EFA NIC layout is per type
+# (EC2NodeClass.spec.networkInterfaces, Karpenter >= 1.11). The layout, the
+# g7 open-kmod fixup and the EFA userspace bootstrap all come from
+# modules/gpu-instance-catalog — the same source the GPU nodegroups use.
+#   - networkInterfaces: (0,0) must be "interface" (CRD rule); EFA goes on
+#     efa-only interfaces, at most one per card. Types whose NIC0 carries EFA
+#     (primary_efa) get an extra efa-only at (card 0, device 1), so the EFA
+#     count matches the nodegroup LT. Types without EFA get no networkInterfaces.
+#   - instanceStorePolicy RAID0: Karpenter renders nodeadm localStorage RAID0
+#     itself (mounted at /mnt/k8s-disks/0, same as the nodegroups'
+#     containerd_storage = "instance_store").
+#   - Labels workload-type=gpu + taint nvidia.com/gpu match what the GPU stack
+#     DaemonSets (device plugins, DCGM, health check) select/tolerate.
+#   - Spot interruptions are handled by Karpenter's interruption queue
+#     (aws_sqs_queue.karpenter_interruption): the node is cordoned/drained on
+#     the 2-minute notice and a replacement is launched immediately.
+# =====================================================================
+module "gpu_catalog" {
+  source                = "../gpu-instance-catalog"
+  efa_installer_version = var.gpu_efa_installer_version
+}
+
+data "aws_ec2_instance_type" "gpu" {
+  for_each      = toset([for p in var.gpu_nodepools : p.instance_type])
+  instance_type = each.key
+}
+
+locals {
+  gpu_pools = { for p in var.gpu_nodepools : p.name => p }
+
+  # `gpus` is a SET in the provider schema — gpus[0] is not a valid index
+  # (a try() around it silently yields 0), so sum over the set instead.
+  gpu_count_per_type = {
+    for t, d in data.aws_ec2_instance_type.gpu : t => (length(d.gpus) > 0 ? sum([for g in d.gpus : g.count]) : 0)
+  }
+
+  gpu_pool_layout = {
+    for n, p in local.gpu_pools : n => lookup(module.gpu_catalog.efa_layout, p.instance_type, module.gpu_catalog.efa_layout_default)
+  }
+
+  gpu_pool_network_interfaces = {
+    for n, l in local.gpu_pool_layout : n => (
+      l.efa_only_count == 0 && !l.primary_efa ? [] : concat(
+        [{ networkCardIndex = 0, deviceIndex = 0, interfaceType = "interface" }],
+        l.primary_efa ? [{ networkCardIndex = 0, deviceIndex = 1, interfaceType = "efa-only" }] : [],
+        [for i in range(1, l.efa_only_count + 1) : { networkCardIndex = i, deviceIndex = 0, interfaceType = "efa-only" }],
+      )
+    )
+  }
+
+  gpu_ami_selector_terms = (
+    startswith(var.gpu_ami_selector, "ami-") ? [{ id = var.gpu_ami_selector }] : [{ alias = var.gpu_ami_selector }]
+  )
+
+  # Karpenter merges this MIME document with its own NodeConfig (cluster
+  # details, kubelet flags, localStorage). The boothook re-runs every boot;
+  # both fragments are idempotent.
+  gpu_userdata = join("", [
+    "MIME-Version: 1.0\n",
+    "Content-Type: multipart/mixed; boundary=\"==BOUNDARY==\"\n\n",
+    "--==BOUNDARY==\n",
+    "Content-Type: text/cloud-boothook; charset=\"us-ascii\"\n\n",
+    "#!/bin/bash\n",
+    "# Karpenter GPU NodePool bootstrap (modules/eks-karpenter)\n",
+    "set -ex\n",
+    "exec > >(tee -a /var/log/gpu-node-bootstrap.log)\n",
+    "exec 2>&1\n\n",
+    module.gpu_catalog.nvidia_open_kmod_fixup_snippet,
+    "\n",
+    var.gpu_install_efa_userspace ? module.gpu_catalog.efa_userspace_snippet : "echo \"EFA userspace install disabled\"\n",
+    "\necho \"=== GPU Node Bootstrap Complete ===\"\n\n",
+    "--==BOUNDARY==\n",
+    "Content-Type: application/node.eks.aws\n\n",
+    "---\n",
+    "apiVersion: node.eks.aws/v1alpha1\n",
+    "kind: NodeConfig\n",
+    "spec:\n",
+    "  containerd:\n",
+    "    config: |\n",
+    "      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia.options]\n",
+    "      SystemdCgroup = true\n\n",
+    "--==BOUNDARY==--\n",
+  ])
+
+  gpu_ec2nodeclasses = [
+    for n, p in local.gpu_pools : {
+      apiVersion = "karpenter.k8s.aws/v1"
+      kind       = "EC2NodeClass"
+      metadata   = { name = "gpu-${n}" }
+      spec = merge(
+        {
+          amiSelectorTerms           = local.gpu_ami_selector_terms
+          role                       = aws_iam_role.karpenter_node.name
+          subnetSelectorTerms        = [{ tags = { "karpenter.sh/discovery" = var.cluster_name } }]
+          securityGroupSelectorTerms = [{ tags = { "karpenter.sh/discovery" = var.cluster_name } }]
+          metadataOptions = {
+            httpEndpoint            = "enabled"
+            httpTokens              = "required"
+            httpPutResponseHopLimit = 2
+          }
+          blockDeviceMappings = [{
+            deviceName = "/dev/xvda"
+            ebs = {
+              volumeSize          = "${p.root_volume_size}Gi"
+              volumeType          = "gp3"
+              encrypted           = true
+              deleteOnTermination = true
+            }
+          }]
+          userData = local.gpu_userdata
+          tags     = { "gpu-instance-type" = p.instance_type }
+        },
+        p.instance_store_policy != "" ? { instanceStorePolicy = p.instance_store_policy } : {},
+        startswith(var.gpu_ami_selector, "ami-") ? { amiFamily = "AL2023" } : {},
+        length(local.gpu_pool_network_interfaces[n]) > 0 ? { networkInterfaces = local.gpu_pool_network_interfaces[n] } : {},
+      )
+    }
+  ]
+
+  gpu_nodepool_objects = [
+    for n, p in local.gpu_pools : {
+      apiVersion = "karpenter.sh/v1"
+      kind       = "NodePool"
+      metadata   = { name = "gpu-${n}" }
+      spec = {
+        template = {
+          metadata = {
+            labels = {
+              "workload-type"     = "gpu"
+              "gpu-instance-type" = p.instance_type
+            }
+          }
+          spec = {
+            nodeClassRef = { group = "karpenter.k8s.aws", kind = "EC2NodeClass", name = "gpu-${n}" }
+            requirements = concat(
+              [
+                { key = "node.kubernetes.io/instance-type", operator = "In", values = [p.instance_type] },
+                { key = "karpenter.sh/capacity-type", operator = "In", values = p.capacity_types },
+              ],
+              length(p.zones) > 0 ? [{ key = "topology.kubernetes.io/zone", operator = "In", values = p.zones }] : [],
+            )
+            taints      = [{ key = "nvidia.com/gpu", value = "true", effect = "NoSchedule" }]
+            expireAfter = p.expire_after
+          }
+        }
+        # Limit in GPUs when the type has them (so max_nodes nodes fit
+        # exactly), else in vCPUs.
+        limits = (
+          local.gpu_count_per_type[p.instance_type] > 0
+          ? { "nvidia.com/gpu" = tostring(p.max_nodes * local.gpu_count_per_type[p.instance_type]) }
+          : { cpu = tostring(p.max_nodes * data.aws_ec2_instance_type.gpu[p.instance_type].default_vcpus) }
+        )
+        disruption = {
+          consolidationPolicy = "WhenEmpty"
+          consolidateAfter    = p.consolidate_after
+          budgets             = [{ nodes = "1" }]
+        }
+        weight = 50
+      }
+    }
+  ]
+}
+
 # bedag/raw is a maintained chart-of-templates wrapper for shipping arbitrary
 # YAML. Earlier we tried itscontained/raw (TLS cert expired 2023-09).
 # Each item in `resources` is rendered verbatim.
@@ -510,8 +676,24 @@ resource "helm_release" "karpenter_pools" {
   replace         = var.helm_replace_existing
 
   values = [yamlencode({
-    resources = [for m in local.karpenter_pools_manifests : yamldecode(m)]
+    resources = concat(
+      [for m in local.karpenter_pools_manifests : yamldecode(m)],
+      local.gpu_ec2nodeclasses,
+      local.gpu_nodepool_objects,
+    )
   })]
+
+  lifecycle {
+    # Karpenter would otherwise launch the node and leave /var/lib/containerd
+    # on the root volume (nodeadm's setup-local-disks exits 0 when there are
+    # no Instance Store disks).
+    precondition {
+      condition = alltrue([for p in var.gpu_nodepools :
+        p.instance_store_policy != "RAID0" || data.aws_ec2_instance_type.gpu[p.instance_type].instance_storage_supported
+      ])
+      error_message = "gpu_nodepools: instance_store_policy = \"RAID0\" requires an instance type with Instance Store. Offending: ${join(", ", [for p in var.gpu_nodepools : "${p.name} (${p.instance_type})" if p.instance_store_policy == "RAID0" && !data.aws_ec2_instance_type.gpu[p.instance_type].instance_storage_supported])}. Set instance_store_policy = \"\" for those pools."
+    }
+  }
 
   depends_on = [helm_release.karpenter]
 }

@@ -212,9 +212,9 @@ gpu_nodegroups = [
 ]
 ```
 
-EFA NIC layout per instance type is built into the module (see
-`modules/eks-gpu-nodegroup/main.tf` — `local.efa_layout`). Currently
-registered:
+EFA NIC layout per instance type lives in `modules/gpu-instance-catalog`
+(`local.efa_layout`), shared by the GPU nodegroups and the Karpenter GPU
+NodePools below. Currently registered:
 
 | Instance | NIC0 type | Extra EFA-only NICs | Notes |
 |---|---|---|---|
@@ -232,6 +232,42 @@ registered:
 
 Anything else falls back to `{ efa_only_count = 0, primary_efa = false }`
 — LT will provision a plain ENA NIC and skip EFA scaffolding.
+
+### Karpenter GPU NodePools (spot-friendly alternative to GPU nodegroups)
+
+With `install_karpenter = true`, `karpenter_gpu_nodepools` provisions GPU
+capacity through Karpenter instead of (or alongside) `gpu_nodegroups`. One
+EC2NodeClass + NodePool per entry, one instance type per pool:
+
+```hcl
+install_karpenter      = true
+install_gpu_nodegroups = false   # or keep both
+karpenter_gpu_nodepools = [
+  { name = "p6-b300-spot", instance_type = "p6-b300.48xlarge",
+    capacity_types = ["spot"], zones = ["ap-south-2c"], max_nodes = 1 },
+]
+```
+
+- **NICs / EFA**: `EC2NodeClass.spec.networkInterfaces` (Karpenter ≥ 1.11)
+  from the shared `efa_layout` — e.g. p6-b300: NIC0 `interface` + 16
+  `efa-only`; NIC0-EFA types (p5, g6e…) get an extra `efa-only` at
+  (card 0, device 1). Types not in the table get no EFA.
+- **Storage**: `instance_store_policy = "RAID0"` (default) — Karpenter renders
+  nodeadm localStorage, mounted at `/mnt/k8s-disks/0` exactly like
+  `containerd_storage = "instance_store"`. Checked at plan/apply time
+  against the type's Instance Store.
+- **AMI**: AL2023 alias (`al2023@<gpu_ami_release_version>` or `latest`;
+  Karpenter picks the NVIDIA variant) or `gpu_custom_ami_id`; override with
+  `karpenter_gpu_ami_selector`.
+- **Bootstrap**: the same g7 open-kmod fixup + EFA userspace boothook as the
+  nodegroups, plus the SystemdCgroup containerd overlay.
+- **Scheduling**: labels `workload-type=gpu`, `gpu-instance-type=<type>`; taint
+  `nvidia.com/gpu=true:NoSchedule` — the GPU stack DaemonSets land as-is.
+- **Spot interruption**: Karpenter's SQS interruption queue cordons/drains the
+  node on the 2-minute notice and launches a replacement immediately (no ASG
+  backoff, no Cluster Autoscaler involvement).
+- **Disruption**: `consolidate_after` (default `1h`, empty nodes only) and
+  `expire_after` (default `Never`).
 
 ### containerd storage: EBS or Instance Store
 

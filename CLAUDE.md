@@ -250,6 +250,7 @@ responsibility:
   - p6-b300.48xlarge: 17 ENIs (1 primary + 16 EFA-only)
   - g7e.48xlarge: 4 ENIs (1 primary + 3 EFA-only)
 - Pricing options (mutually exclusive — choose ONE): OD / Spot / ODCR / CB
+- Alternative: Karpenter GPU NodePools (`karpenter_gpu_nodepools`, needs `install_karpenter`) — one EC2NodeClass+NodePool per instance type; EFA `networkInterfaces` from the shared `modules/gpu-instance-catalog` (also holds the g7 fixup + EFA userspace boothook used by both paths); `instanceStorePolicy: RAID0`; spot interruptions via Karpenter's SQS queue
 - containerd storage per NG (`gpu_containerd_storage` / `gpu_nodegroups[].containerd_storage`): `ebs` (default — gp3 data volume + LVM + Instance Store scratch) or `instance_store` (nodeadm localStorage RAID0 over all NVMe; no data volume; mutually exclusive with `gpu_enable_local_lvm`; Terraform only)
 - Node labels: `workload-type=gpu`, `gpu-instance-type=<type>`, `purchase-option=<od|spot|odcr|cb>`
 - Taints: `nvidia.com/gpu:NoSchedule`

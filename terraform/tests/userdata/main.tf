@@ -28,6 +28,13 @@ variable "enable_local_lvm" {
   default = true
 }
 
+# Shared GPU bootstrap fragments (same module the GPU nodegroup + Karpenter
+# GPU NodePools use).
+module "catalog" {
+  source                = "../../modules/gpu-instance-catalog"
+  efa_installer_version = "1.48.0"
+}
+
 locals {
   system_userdata = templatefile("${path.module}/../../modules/eks-system-nodegroup/templates/userdata.sh.tpl", {
     cluster_name                 = "test-cluster"
@@ -40,23 +47,24 @@ locals {
   })
 
   gpu_userdata = templatefile("${path.module}/../../modules/eks-gpu-nodegroup/templates/userdata.sh.tpl", {
-    cluster_name                 = "test-cluster"
-    cluster_endpoint             = "https://ABC.gr7.us-east-1.eks.amazonaws.com"
-    cluster_ca                   = "LS0tLS1CRUdJTg=="
-    service_ipv4_cidr            = "172.20.0.0/16"
-    enable_local_lvm             = var.enable_local_lvm
-    local_lvm_vg_name            = "vg_local"
-    local_lvm_lv_name            = "lv_scratch"
-    local_lvm_mount              = "/mnt/scratch"
-    local_lvm_fs                 = "xfs"
-    local_lvm_stripe_kb          = "256"
-    install_efa_userspace        = var.install_efa_userspace
-    efa_installer_version        = "1.48.0"
-    ebs_data_disk_detect_snippet = "detect_ebs_data_disk() { echo /dev/xvdb; }"
-    node_management              = var.node_management
-    extra_node_labels            = var.node_management == "self_managed" ? "workload-type=gpu,gpu-instance-type=p5.48xlarge,purchase-option=od" : ""
-    node_taints                  = var.node_management == "self_managed" ? "nvidia.com/gpu=true:NoSchedule" : ""
-    containerd_storage           = var.containerd_storage
+    cluster_name                   = "test-cluster"
+    cluster_endpoint               = "https://ABC.gr7.us-east-1.eks.amazonaws.com"
+    cluster_ca                     = "LS0tLS1CRUdJTg=="
+    service_ipv4_cidr              = "172.20.0.0/16"
+    enable_local_lvm               = var.enable_local_lvm
+    local_lvm_vg_name              = "vg_local"
+    local_lvm_lv_name              = "lv_scratch"
+    local_lvm_mount                = "/mnt/scratch"
+    local_lvm_fs                   = "xfs"
+    local_lvm_stripe_kb            = "256"
+    install_efa_userspace          = var.install_efa_userspace
+    efa_userspace_snippet          = module.catalog.efa_userspace_snippet
+    nvidia_open_kmod_fixup_snippet = module.catalog.nvidia_open_kmod_fixup_snippet
+    ebs_data_disk_detect_snippet   = "detect_ebs_data_disk() { echo /dev/xvdb; }"
+    node_management                = var.node_management
+    extra_node_labels              = var.node_management == "self_managed" ? "workload-type=gpu,gpu-instance-type=p5.48xlarge,purchase-option=od" : ""
+    node_taints                    = var.node_management == "self_managed" ? "nvidia.com/gpu=true:NoSchedule" : ""
+    containerd_storage             = var.containerd_storage
   })
 
   # The body of the cloud-boothook part only — i.e. everything BEFORE the
