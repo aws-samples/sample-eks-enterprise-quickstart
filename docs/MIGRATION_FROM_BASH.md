@@ -52,6 +52,7 @@ old `scripts/legacy/` bash pipeline.
 | `KARPENTER_VERSION` | `karpenter_version` |
 | `INSTALL_EFS_CSI` / `INSTALL_FSX_CSI` | `install_efs_csi` / `install_fsx_csi` |
 | `S3_BUCKET_ARNS` | `s3_csi_bucket_arns` |
+| `POD_IDENTITY_PROPAGATION_WAIT` (seconds, e.g. `30`) | `pod_identity_propagation_wait` (duration, e.g. `"30s"`) |
 | `GPU_INSTANCE_TYPES` + `DEPLOY_GPU_OD/SPOT/ODCR/CB` | `gpu_nodegroups` (list of objects) |
 | `ODCR_IDS/AZS` + `CAPACITY_BLOCK_IDS/AZS` | per-entry `capacity_reservation_id` + `subnet_ids` |
 | `GPU_PG_STRATEGY` | per-entry `placement_group` (`none`|`cluster`) |

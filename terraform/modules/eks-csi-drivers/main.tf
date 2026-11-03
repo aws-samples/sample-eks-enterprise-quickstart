@@ -37,6 +37,24 @@ resource "aws_eks_pod_identity_association" "ebs_csi" {
   role_arn        = aws_iam_role.ebs_csi.arn
 }
 
+# Pod Identity propagation wait (issue #2) for every CSI controller in this
+# module. Associations are eventually consistent; a controller pod admitted
+# before propagation never gets the AWS_CONTAINER_* env and falls back to the
+# node role (AccessDenied). See the full rationale on
+# time_sleep.pod_identity_propagation in modules/eks-addons/main.tf.
+# triggers re-run the wait only when an association is created or replaced
+# (e.g. enabling EFS later); steady-state applies don't wait.
+resource "time_sleep" "pod_identity_propagation" {
+  create_duration = var.pod_identity_propagation_wait
+
+  triggers = {
+    ebs_csi = aws_eks_pod_identity_association.ebs_csi.association_id
+    efs_csi = try(aws_eks_pod_identity_association.efs_csi[0].association_id, "")
+    fsx_csi = try(aws_eks_pod_identity_association.fsx_csi[0].association_id, "")
+    s3_csi  = try(aws_eks_pod_identity_association.s3_csi[0].association_id, "")
+  }
+}
+
 resource "aws_eks_addon" "ebs_csi" {
   cluster_name                = var.cluster_name
   addon_name                  = "aws-ebs-csi-driver"
@@ -53,7 +71,10 @@ resource "aws_eks_addon" "ebs_csi" {
     }
   })
 
-  depends_on = [aws_eks_pod_identity_association.ebs_csi]
+  depends_on = [
+    aws_eks_pod_identity_association.ebs_csi,
+    time_sleep.pod_identity_propagation,
+  ]
 }
 
 # =====================================================================
@@ -166,7 +187,10 @@ resource "aws_eks_addon" "efs_csi" {
     }
   })
 
-  depends_on = [aws_eks_pod_identity_association.efs_csi]
+  depends_on = [
+    aws_eks_pod_identity_association.efs_csi,
+    time_sleep.pod_identity_propagation,
+  ]
 }
 
 # =====================================================================
@@ -230,7 +254,10 @@ resource "aws_eks_addon" "fsx_csi" {
     }
   })
 
-  depends_on = [aws_eks_pod_identity_association.fsx_csi]
+  depends_on = [
+    aws_eks_pod_identity_association.fsx_csi,
+    time_sleep.pod_identity_propagation,
+  ]
 }
 
 # =====================================================================
@@ -332,5 +359,8 @@ resource "aws_eks_addon" "s3_csi" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
-  depends_on = [aws_eks_pod_identity_association.s3_csi]
+  depends_on = [
+    aws_eks_pod_identity_association.s3_csi,
+    time_sleep.pod_identity_propagation,
+  ]
 }

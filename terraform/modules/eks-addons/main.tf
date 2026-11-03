@@ -181,6 +181,38 @@ resource "aws_eks_pod_identity_association" "cluster_autoscaler" {
   depends_on = [kubernetes_service_account_v1.cluster_autoscaler]
 }
 
+# ---------------------------------------------------------------------
+# Pod Identity propagation wait (issue #2)
+#
+# EKS Pod Identity associations are eventually consistent: per the EKS API
+# docs they "may take several seconds to be effective after the initial API
+# call returns successfully". The AWS_CONTAINER_CREDENTIALS_FULL_URI /
+# AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE env is injected by the EKS control
+# plane's mutating webhook at pod ADMISSION. A pod admitted inside the
+# propagation window never gets it, so the SDK falls back to the node
+# instance role (AccessDenied). For cluster-autoscaler that is fatal and
+# permanent: CrashLoopBackOff only restarts the container inside the same
+# pod, so the env never appears until the pod is recreated
+# (`kubectl rollout restart deployment cluster-autoscaler -n kube-system`).
+#
+# depends_on on the association is necessary but not sufficient — it only
+# orders the API call. This sleep sits between "association created" and
+# "pods admitted" for every Pod Identity consumer in this module (CA + ALB
+# controller). triggers re-run it only when an association is created or
+# replaced, so steady-state applies don't wait. There is no API to poll for
+# propagation; a probe-pod gate would need an extra shell image (mirrors in
+# CN / air-gapped) or kubectl on the runner, so a bounded wait with a wide
+# margin over the documented "several seconds" is the trade-off taken.
+# ---------------------------------------------------------------------
+resource "time_sleep" "pod_identity_propagation" {
+  create_duration = var.pod_identity_propagation_wait
+
+  triggers = {
+    alb_controller     = aws_eks_pod_identity_association.alb_controller.association_id
+    cluster_autoscaler = try(aws_eks_pod_identity_association.cluster_autoscaler[0].association_id, "")
+  }
+}
+
 resource "helm_release" "cluster_autoscaler" {
   count = var.install_cluster_autoscaler ? 1 : 0
 
@@ -244,7 +276,12 @@ resource "helm_release" "cluster_autoscaler" {
     }
   })]
 
-  depends_on = [aws_eks_pod_identity_association.cluster_autoscaler]
+  # Gate on the propagation wait, not just the association API call — see
+  # time_sleep.pod_identity_propagation above (issue #2).
+  depends_on = [
+    aws_eks_pod_identity_association.cluster_autoscaler,
+    time_sleep.pod_identity_propagation,
+  ]
 }
 
 # =====================================================================
@@ -392,6 +429,7 @@ resource "helm_release" "alb_controller" {
   # set (no dependency) when count=0 and to the instance when count=1.
   depends_on = [
     aws_eks_pod_identity_association.alb_controller,
+    time_sleep.pod_identity_propagation,
     aws_eks_addon.coredns,
     aws_eks_addon.metrics_server,
     helm_release.cluster_autoscaler,

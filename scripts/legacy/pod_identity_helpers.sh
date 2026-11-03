@@ -157,6 +157,27 @@ attach_custom_policy() {
     attach_managed_policy "${role_name}" "${policy_arn}"
 }
 
+# Pod Identity association 是最终一致的（EKS API 文档："may take several
+# seconds to be effective"）。在传播完成前被 admission 的 pod 拿不到
+# AWS_CONTAINER_* 环境变量，会回退到节点 role 并 AccessDenied（issue #2；
+# cluster-autoscaler 会一直 CrashLoop 直到 pod 被重建）。新建 association 后
+# 等待这么多秒再返回，调用方随后部署的 pod 就落在传播窗口之外。
+# 设为 0 可关闭。与 Terraform 的 pod_identity_propagation_wait 对应。
+POD_IDENTITY_PROPAGATION_WAIT="${POD_IDENTITY_PROPAGATION_WAIT:-30}"
+
+# 新建 association 之后调用（已存在的 association 不需要等待）
+wait_for_pod_identity_propagation() {
+    case "${POD_IDENTITY_PROPAGATION_WAIT}" in
+        ''|*[!0-9]*)
+            error "POD_IDENTITY_PROPAGATION_WAIT must be a non-negative integer (seconds), got '${POD_IDENTITY_PROPAGATION_WAIT}'"
+            ;;
+    esac
+    if [ "${POD_IDENTITY_PROPAGATION_WAIT}" -gt 0 ]; then
+        log "Waiting ${POD_IDENTITY_PROPAGATION_WAIT}s for the Pod Identity association to propagate before pods are admitted (issue #2)..."
+        sleep "${POD_IDENTITY_PROPAGATION_WAIT}"
+    fi
+}
+
 # 创建 Pod Identity Association
 # 参数: $1 = namespace, $2 = service_account, $3 = role_name
 create_pod_identity_association() {
@@ -192,6 +213,8 @@ create_pod_identity_association() {
         --service-account "${service_account}" \
         --role-arn "${role_arn}" &>/dev/null; then
         log "✓ Pod Identity Association created successfully"
+        # 只在新建时等待（已存在的 association 早已传播完成，上面直接 return）
+        wait_for_pod_identity_propagation
     else
         error "Failed to create Pod Identity Association for ${namespace}/${service_account}"
     fi

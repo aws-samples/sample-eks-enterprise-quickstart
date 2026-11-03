@@ -95,6 +95,7 @@ module "eks_addons" {
   helm_replace_existing            = var.helm_replace_existing
   system_node_label_key            = var.system_node_label_key
   system_node_label_value          = var.system_node_label_value
+  pod_identity_propagation_wait    = var.pod_identity_propagation_wait
 
   depends_on = [module.eks_system_nodegroup]
 }
@@ -114,6 +115,8 @@ module "eks_csi_drivers" {
   s3_bucket_arns          = var.s3_csi_bucket_arns
   system_node_label_key   = var.system_node_label_key
   system_node_label_value = var.system_node_label_value
+
+  pod_identity_propagation_wait = var.pod_identity_propagation_wait
 
   depends_on = [module.eks_addons]
 }
@@ -135,6 +138,8 @@ module "eks_karpenter" {
   system_node_label_key     = var.system_node_label_key
   system_node_label_value   = var.system_node_label_value
   private_subnet_ids        = var.private_subnet_ids
+
+  pod_identity_propagation_wait = var.pod_identity_propagation_wait
 
   depends_on = [module.eks_addons]
 }

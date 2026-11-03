@@ -90,6 +90,19 @@ matching the bash flow's `withOIDC: false`. Karpenter, Cluster Autoscaler,
 ALB Controller, and every CSI driver use `aws_eks_pod_identity_association`
 — there is no IAM OIDC provider unless you opt in.
 
+**Association propagation.** Pod Identity associations are eventually
+consistent ("may take several seconds to be effective" — EKS API docs).
+The credential env (`AWS_CONTAINER_CREDENTIALS_FULL_URI` / `..._TOKEN_FILE`)
+is injected at pod admission, so a pod created inside that window falls
+back to the node role and gets AccessDenied — for cluster-autoscaler that
+is a permanent CrashLoopBackOff until the pod is recreated (issue #2). Each
+module that creates associations (`eks-addons`, `eks-csi-drivers`,
+`eks-karpenter`) therefore holds its consumers behind a
+`time_sleep.pod_identity_propagation` of `pod_identity_propagation_wait`
+(default `"30s"`). It only runs when an association is created or
+replaced, so steady-state applies don't wait. If a pod still slipped
+through, see "Pod Identity 认证失败" in `docs/DEPLOYMENT_SOP.md`.
+
 Enable IRSA only if external systems need to verify cluster-issued
 JWTs (e.g. GitHub Actions OIDC federation, cross-account workload
 identity). **Important caveat for private clusters**: the `eks` VPC

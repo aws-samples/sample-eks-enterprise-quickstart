@@ -348,6 +348,27 @@ variable "karpenter_ssh_public_key" {
   default     = ""
 }
 
+variable "pod_identity_propagation_wait" {
+  type        = string
+  description = <<-EOT
+    How long to wait after creating (or replacing) EKS Pod Identity
+    associations before deploying the pods that use them — cluster-autoscaler,
+    ALB controller, EBS/EFS/FSx/S3 CSI controllers, Karpenter. Associations are
+    eventually consistent ("several seconds" per the EKS API docs): a pod
+    admitted before propagation never gets the AWS_CONTAINER_* env injected,
+    falls back to the node role and fails with AccessDenied (issue #2;
+    cluster-autoscaler then CrashLoops until its pods are recreated). The wait
+    only runs when an association is created or replaced, not on every apply.
+    Duration string for time_sleep, e.g. "30s", "1m"; "0s" disables it.
+  EOT
+  default     = "30s"
+
+  validation {
+    condition     = can(regex("^[0-9]+(s|m)$", var.pod_identity_propagation_wait))
+    error_message = "pod_identity_propagation_wait must be a duration like \"30s\" or \"1m\" (\"0s\" disables the wait)."
+  }
+}
+
 variable "helm_replace_existing" {
   type        = bool
   description = "Set helm_release.replace=true on every managed helm release (cluster-autoscaler, ALB controller, karpenter, karpenter-pools, nvidia-device-plugin). Only enable in dev/test — when true, an interrupted apply that left a stale release behind is auto-recovered, but in production this would silently take over a manually-managed release and is a footgun."
