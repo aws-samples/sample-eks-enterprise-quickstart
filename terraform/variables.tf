@@ -445,7 +445,7 @@ variable "gpu_local_lvm_fs" {
 # Two mutually exclusive modes:
 #   standard — nvidia-device-plugin + EFA + dcgm-exporter +
 #              node-problem-detector + gpu-health-check
-#   operator — NVIDIA GPU Operator (driver/toolkit/mofed disabled to
+#   operator — NVIDIA GPU Operator (driver/toolkit/RDMA disabled to
 #              coexist with EKS GPU AMI + AWS EFA plugin) + EFA
 variable "install_gpu_stack" {
   type        = bool
@@ -547,10 +547,19 @@ variable "gpu_operator_toolkit_enabled" {
   default     = false
 }
 
+# DEPRECATED (#13): this used to set a top-level `mofedDriver.enabled` Helm
+# value that does not exist in the NVIDIA GPU Operator chart, so it never had
+# any effect. Kept only so existing tfvars that set it to false keep working;
+# setting it to true fails fast instead of silently doing nothing.
 variable "gpu_operator_mofed_enabled" {
   type        = bool
-  description = "Operator's MOFED driver. Default false because AWS EFA plugin owns /dev/infiniband/uverbs*."
+  description = "DEPRECATED — has no effect and is no longer passed to the GPU stack. The GPU Operator chart has no `mofedDriver` key; its RDMA switch (driver.rdma, the nvidia-peermem sidecar of the Operator's driver DaemonSet) stays off because the EKS GPU AMI ships the driver and AWS EFA (efa-nv-peermem + aws-efa-k8s-device-plugin) owns GPUDirect RDMA and /dev/infiniband/uverbs*. Must be false; remove it from your tfvars."
   default     = false
+
+  validation {
+    condition     = var.gpu_operator_mofed_enabled == false
+    error_message = "gpu_operator_mofed_enabled is deprecated and has no effect: the GPU Operator chart has no mofedDriver key, and on EKS GPU AMIs GPUDirect RDMA over EFA is provided by the AMI's efa-nv-peermem + aws-efa-k8s-device-plugin. Remove the setting (see issue #13)."
+  }
 }
 
 variable "gpu_operator_mig_strategy" {

@@ -15,7 +15,7 @@
 #
 #   GPU_STACK_MODE=operator
 #     - NVIDIA GPU Operator (helm; bundles device-plugin/GFD/NFD/dcgm/
-#                            validator). driver/toolkit/mofed are DISABLED
+#                            validator). driver/toolkit/RDMA are DISABLED
 #                            because EKS GPU AMI ships them and AWS EFA
 #                            owns /dev/infiniband/uverbs*.
 #     - aws-efa-k8s-device-plugin (still installed by us, NOT Operator)
@@ -36,8 +36,9 @@
 #   - EKS GPU AMI ships driver + nvidia-container-toolkit, so Operator
 #     must run with driver.enabled=false and toolkit.enabled=false.
 #   - AWS EFA device-plugin requires /dev/infiniband/uverbs*; therefore
-#     mofedDriver.enabled=false in Operator AND mofedEnabled=false in
-#     standard's device-plugin chart values.
+#     driver.rdma.enabled=false in Operator AND mofedEnabled=false in
+#     standard's device-plugin chart values. (The Operator chart has no
+#     top-level mofedDriver key — see #13.)
 #   - workload-type=gpu nodeSelector + nvidia.com/gpu:NoSchedule
 #     toleration must apply to every DS we install.
 # =====================================================================
@@ -112,8 +113,18 @@ GPU_OPERATOR_RELEASE_NAME="${GPU_OPERATOR_RELEASE_NAME:-gpu-operator}"
 # AMI already ships these — Operator's containerized versions would conflict
 GPU_OPERATOR_DRIVER_ENABLED="${GPU_OPERATOR_DRIVER_ENABLED:-false}"
 GPU_OPERATOR_TOOLKIT_ENABLED="${GPU_OPERATOR_TOOLKIT_ENABLED:-false}"
-# AWS EFA plugin owns /dev/infiniband/uverbs*; Operator must not touch it
+# DEPRECATED (#13): used to render a top-level mofedDriver.enabled value that
+# the GPU Operator chart doesn't have, so it never had any effect. Still read
+# so that a non-false value fails fast here — before anything is installed —
+# instead of silently doing nothing.
 GPU_OPERATOR_MOFED_ENABLED="${GPU_OPERATOR_MOFED_ENABLED:-false}"
+if [ "${GPU_OPERATOR_MOFED_ENABLED}" != "false" ]; then
+    echo "ERROR: GPU_OPERATOR_MOFED_ENABLED is deprecated and has no effect (see #13)." >&2
+    echo "  The GPU Operator chart has no mofedDriver key, and on EKS GPU AMIs GPUDirect" >&2
+    echo "  RDMA over EFA is provided by the AMI's efa-nv-peermem + aws-efa-k8s-device-plugin." >&2
+    echo "  Unset GPU_OPERATOR_MOFED_ENABLED and re-run." >&2
+    exit 1
+fi
 # MIG strategy (none|single|mixed). Default off — only A100/H100 users need it.
 GPU_OPERATOR_MIG_STRATEGY="${GPU_OPERATOR_MIG_STRATEGY:-none}"
 
@@ -616,10 +627,14 @@ EOF
 #                            with the host one and likely fail to load.
 #   toolkit.enabled=false  — Same: AMI ships nvidia-container-toolkit
 #                            (jit-cdi mode by default in 1.18+).
-#   mofedDriver.enabled=false — AWS EFA plugin already binds
-#                            /dev/infiniband/uverbs*. Letting the
-#                            Operator install MOFED would clash.
-#   driver.rdma.enabled=false — Belt-and-suspenders for #3.
+#   driver.rdma.enabled=false — driver.rdma only toggles the nvidia-peermem
+#                            sidecar of the Operator's driver DaemonSet
+#                            (MOFED/InfiniBand GPUDirect RDMA), which isn't
+#                            deployed at all while driver.enabled=false. On
+#                            AWS, GPUDirect RDMA over EFA uses the AMI's
+#                            efa-nv-peermem, and the AWS EFA plugin owns
+#                            /dev/infiniband/uverbs*. (The chart has no
+#                            top-level mofedDriver key — see #13.)
 #   migManager.enabled is gated by GPU_OPERATOR_MIG_STRATEGY (default off).
 #
 # We do NOT install AWS EFA via the Operator; install_efa_device_plugin()
@@ -634,7 +649,7 @@ install_gpu_operator() {
     echo "  Chart:     nvidia/gpu-operator --version ${op_ver}"
     echo "  Namespace: ${GPU_OPERATOR_NAMESPACE}"
     echo "  Release:   ${GPU_OPERATOR_RELEASE_NAME}"
-    echo "  driver.enabled=${GPU_OPERATOR_DRIVER_ENABLED} toolkit.enabled=${GPU_OPERATOR_TOOLKIT_ENABLED} mofed.enabled=${GPU_OPERATOR_MOFED_ENABLED} mig.strategy=${GPU_OPERATOR_MIG_STRATEGY}"
+    echo "  driver.enabled=${GPU_OPERATOR_DRIVER_ENABLED} toolkit.enabled=${GPU_OPERATOR_TOOLKIT_ENABLED} driver.rdma.enabled=false mig.strategy=${GPU_OPERATOR_MIG_STRATEGY}"
 
     # mig.strategy=none disables migManager pods entirely; A100/H100 users
     # set this to single|mixed and label nodes with nvidia.com/mig.config.
@@ -662,8 +677,6 @@ driver:
     enabled: false
 toolkit:
   enabled: ${GPU_OPERATOR_TOOLKIT_ENABLED}
-mofedDriver:
-  enabled: ${GPU_OPERATOR_MOFED_ENABLED}
 devicePlugin:
   enabled: true
 dcgmExporter:
@@ -764,7 +777,7 @@ elif [ "${GPU_STACK_MODE}" = "operator" ]; then
     echo "  • NVIDIA GPU Operator: helm release ${GPU_OPERATOR_RELEASE_NAME} (${GPU_OPERATOR_VERSION})"
     echo "      driver.enabled=${GPU_OPERATOR_DRIVER_ENABLED}"
     echo "      toolkit.enabled=${GPU_OPERATOR_TOOLKIT_ENABLED}"
-    echo "      mofedDriver.enabled=${GPU_OPERATOR_MOFED_ENABLED}"
+    echo "      driver.rdma.enabled=false"
     echo "      mig.strategy=${GPU_OPERATOR_MIG_STRATEGY}"
     [ "${INSTALL_EFA_DEVICE_PLUGIN}" = "true" ] && echo "  • AWS EFA Device Plugin: aws-efa-k8s-device-plugin-daemonset (${EFA_DEVICE_PLUGIN_VERSION})"
     echo ""

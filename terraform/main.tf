@@ -210,7 +210,6 @@ module "eks_gpu_stack" {
   gpu_operator_namespace       = var.gpu_operator_namespace
   gpu_operator_driver_enabled  = var.gpu_operator_driver_enabled
   gpu_operator_toolkit_enabled = var.gpu_operator_toolkit_enabled
-  gpu_operator_mofed_enabled   = var.gpu_operator_mofed_enabled
   gpu_operator_mig_strategy    = var.gpu_operator_mig_strategy
 
   # Wait for nodegroup module so DaemonSets become Ready when nodes join.
