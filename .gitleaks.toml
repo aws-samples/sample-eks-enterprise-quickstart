@@ -32,8 +32,14 @@ paths = [
 ]
 
 # Public / placeholder constants that are not secrets:
-#   602401143452 — AWS EKS add-on ECR account (all commercial regions).
-#   961992271922 — AWS EKS add-on ECR account (China regions).
+#   602401143452 — AWS EKS add-on ECR account (original commercial regions).
+#   961992271922 — AWS EKS add-on ECR account (cn-northwest-1).
+#   Remaining per-region EKS add-on ECR accounts (opt-in regions, GovCloud,
+#   cn-north-1, eusc) — published in
+#   https://docs.aws.amazon.com/eks/latest/userguide/add-ons-images.html and
+#   mirrored in modules/eks-gpu-stack/main.tf eks_addon_ecr_account_by_region.
+#   Listed individually (no \d{12} wildcard) so the private-ID block rule
+#   below can't be masked.
 #   123456789012 — AWS documentation placeholder account ID, used in
 #                  .env.example, examples/*.yaml, and option_install_csi_drivers.sh.
 #   public.ecr.aws/ — public ECR registry host.
@@ -43,6 +49,27 @@ paths = [
 regexes = [
   '''\b602401143452\b''',
   '''\b961992271922\b''',
+  '''\b013241004608\b''',
+  '''\b066635153087\b''',
+  '''\b121268973566\b''',
+  '''\b151610086707\b''',
+  '''\b151742754352\b''',
+  '''\b296578399912\b''',
+  '''\b333609536671\b''',
+  '''\b455263428931\b''',
+  '''\b491585149902\b''',
+  '''\b533267051163\b''',
+  '''\b558608220178\b''',
+  '''\b590381155156\b''',
+  '''\b730335286997\b''',
+  '''\b759879836304\b''',
+  '''\b761377655185\b''',
+  '''\b800184023465\b''',
+  '''\b877085696533\b''',
+  '''\b877088126301\b''',
+  '''\b900612956339\b''',
+  '''\b900889452093\b''',
+  '''\b918309763551\b''',
   '''\b123456789012\b''',
   '''public\.ecr\.aws/''',
 ]
