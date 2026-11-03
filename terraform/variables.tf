@@ -629,3 +629,48 @@ variable "default_tags" {
   type    = map(string)
   default = {}
 }
+
+# =====================================================================
+# Karpenter GPU NodePools
+# =====================================================================
+variable "karpenter_gpu_nodepools" {
+  type = list(object({
+    name                  = string
+    instance_type         = string
+    capacity_types        = optional(list(string), ["spot"])
+    zones                 = optional(list(string), [])
+    max_nodes             = optional(number, 1)
+    instance_store_policy = optional(string, "RAID0")
+    root_volume_size      = optional(number, 100)
+    consolidate_after     = optional(string, "1h")
+    expire_after          = optional(string, "Never")
+  }))
+  default     = []
+  description = <<-EOT
+    GPU capacity provisioned by Karpenter instead of (or alongside) the EKS
+    GPU nodegroups. One EC2NodeClass + NodePool per entry, one instance type
+    per pool (its EFA NIC layout comes from modules/gpu-instance-catalog, the
+    same table the nodegroups use). Requires install_karpenter = true.
+      capacity_types        ["spot"] (default) / ["on-demand"] / both
+      zones                 restrict to AZs, e.g. ["ap-south-2c"]; [] = all
+                            AZs of the Karpenter discovery subnets
+      max_nodes             NodePool limit in nodes (converted to nvidia.com/gpu)
+      instance_store_policy "RAID0" (default; containerd/kubelet/emptyDir on
+                            Instance Store NVMe at /mnt/k8s-disks/0) or ""
+      consolidate_after     idle time before an empty node is removed ("Never" to keep)
+      expire_after          forced rotation ("Never" by default for GPU nodes)
+    Spot interruptions: Karpenter's SQS interruption queue cordons/drains the
+    node on the 2-minute notice and launches a replacement right away.
+  EOT
+
+  validation {
+    condition     = length(var.karpenter_gpu_nodepools) == 0 || var.install_karpenter
+    error_message = "karpenter_gpu_nodepools requires install_karpenter = true."
+  }
+}
+
+variable "karpenter_gpu_ami_selector" {
+  type        = string
+  default     = ""
+  description = "Override the GPU NodePool AMI: \"al2023@latest\", \"al2023@vYYYYMMDD\" or \"ami-...\". Empty = gpu_custom_ami_id if set, else al2023@<gpu_ami_release_version>, else al2023@latest."
+}

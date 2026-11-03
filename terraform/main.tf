@@ -141,7 +141,23 @@ module "eks_karpenter" {
 
   pod_identity_propagation_wait = var.pod_identity_propagation_wait
 
+  # GPU NodePools — same AMI pin / EFA userspace settings as the GPU nodegroups.
+  gpu_nodepools             = var.karpenter_gpu_nodepools
+  gpu_ami_selector          = local.karpenter_gpu_ami_selector
+  gpu_install_efa_userspace = var.gpu_install_efa_userspace
+  gpu_efa_installer_version = var.gpu_efa_installer_version
+
   depends_on = [module.eks_addons]
+}
+
+locals {
+  # Explicit override > custom AMI > pinned EKS AMI release > latest.
+  karpenter_gpu_ami_selector = (
+    var.karpenter_gpu_ami_selector != "" ? var.karpenter_gpu_ami_selector :
+    var.gpu_custom_ami_id != "" ? var.gpu_custom_ami_id :
+    var.gpu_ami_release_version != "" ? "al2023@${var.gpu_ami_release_version}" :
+    "al2023@latest"
+  )
 }
 
 # =====================================================================

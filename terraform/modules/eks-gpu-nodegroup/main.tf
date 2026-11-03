@@ -2,48 +2,20 @@ data "aws_partition" "current" {}
 data "aws_caller_identity" "current" {}
 
 # ===================================================================
-# Per-instance-type EFA layout
-#
-# efa_only_count: number of EFA-only NICs on indices 1..N (primary NIC at
-# index 0). p6-b300 is special: NIC 0 is ENA-only, NIC 1..16 carry EFA.
+# Per-instance-type EFA layout — lives in modules/gpu-instance-catalog so the
+# Karpenter GPU NodePools (modules/eks-karpenter) use the exact same table.
 # Unknown instance types fall back to no EFA (efa_only_count=0,
 # primary_efa=false) — the LT will then provision a plain ENA NIC and
 # silently skip the EFA-only NICs.
 # ===================================================================
+module "catalog" {
+  source                = "../gpu-instance-catalog"
+  efa_installer_version = var.efa_installer_version
+}
+
 locals {
-  efa_layout_default = { efa_only_count = 0, primary_efa = false }
-  efa_layout = {
-    # Multi-NIC training accelerators
-    "p5.48xlarge"      = { efa_only_count = 31, primary_efa = true }
-    "p5e.48xlarge"     = { efa_only_count = 31, primary_efa = true } # H200; same 32-NIC layout as p5
-    "p5en.48xlarge"    = { efa_only_count = 15, primary_efa = true }
-    "p6-b200.48xlarge" = { efa_only_count = 7, primary_efa = true }
-    "p6-b300.48xlarge" = { efa_only_count = 16, primary_efa = false } # NIC 0 = ENA only
-
-    # G6e (NVIDIA L40S) — EFA enabled on 8xlarge+; smaller sizes have no EFA.
-    # MaximumNetworkCards: 1 for 8/12/16xlarge, 2 for 24xlarge, 4 for 48xlarge.
-    "g6e.8xlarge"  = { efa_only_count = 0, primary_efa = true }
-    "g6e.12xlarge" = { efa_only_count = 0, primary_efa = true }
-    "g6e.16xlarge" = { efa_only_count = 0, primary_efa = true }
-    "g6e.24xlarge" = { efa_only_count = 1, primary_efa = true }
-    "g6e.48xlarge" = { efa_only_count = 3, primary_efa = true }
-
-    # G7e (NVIDIA RTX PRO 6000 Blackwell) — EFAv4, GPUDirect RDMA on multi-GPU sizes.
-    # MaximumNetworkCards: 1 for 8/12xlarge, 2 for 24xlarge, 4 for 48xlarge.
-    # 2/4xlarge sizes have no EFA support and intentionally absent.
-    "g7e.8xlarge"  = { efa_only_count = 0, primary_efa = true }
-    "g7e.12xlarge" = { efa_only_count = 0, primary_efa = true }
-    "g7e.24xlarge" = { efa_only_count = 1, primary_efa = true }
-    "g7e.48xlarge" = { efa_only_count = 3, primary_efa = true }
-
-    # G7 (NVIDIA RTX PRO 4500 Blackwell) — EFA on 8xlarge+.
-    # MaximumNetworkCards: 1 for 8/12/24xlarge, 2 for 48xlarge (per
-    # DescribeInstanceTypes MaximumEfaInterfaces). 2/4xlarge have no EFA.
-    "g7.8xlarge"  = { efa_only_count = 0, primary_efa = true }
-    "g7.12xlarge" = { efa_only_count = 0, primary_efa = true }
-    "g7.24xlarge" = { efa_only_count = 0, primary_efa = true }
-    "g7.48xlarge" = { efa_only_count = 1, primary_efa = true }
-  }
+  efa_layout_default = module.catalog.efa_layout_default
+  efa_layout         = module.catalog.efa_layout
 
   # NG key = "<resource-name>-<purchase>-<suffix>". Used as for_each key
   # everywhere to keep all per-NG resources aligned.
@@ -302,23 +274,24 @@ locals {
 
   userdata = {
     for k, ng in local.nodegroups_map : k => templatefile("${path.module}/templates/userdata.sh.tpl", {
-      cluster_name                 = var.cluster_name
-      cluster_endpoint             = var.cluster_endpoint
-      cluster_ca                   = var.cluster_ca
-      service_ipv4_cidr            = var.service_ipv4_cidr
-      enable_local_lvm             = var.enable_local_lvm
-      local_lvm_vg_name            = var.local_lvm_vg_name
-      local_lvm_lv_name            = var.local_lvm_lv_name
-      local_lvm_mount              = var.local_lvm_mount
-      local_lvm_fs                 = var.local_lvm_fs
-      local_lvm_stripe_kb          = var.local_lvm_stripe_kb
-      install_efa_userspace        = var.install_efa_userspace
-      efa_installer_version        = var.efa_installer_version
-      ebs_data_disk_detect_snippet = file("${path.module}/templates/detect-ebs-disk.sh")
-      node_management              = var.node_management
-      extra_node_labels            = local.ng_extra_node_labels[k]
-      node_taints                  = local.ng_node_taints[k]
-      containerd_storage           = local.ng_containerd_storage[k]
+      cluster_name                   = var.cluster_name
+      cluster_endpoint               = var.cluster_endpoint
+      cluster_ca                     = var.cluster_ca
+      service_ipv4_cidr              = var.service_ipv4_cidr
+      enable_local_lvm               = var.enable_local_lvm
+      local_lvm_vg_name              = var.local_lvm_vg_name
+      local_lvm_lv_name              = var.local_lvm_lv_name
+      local_lvm_mount                = var.local_lvm_mount
+      local_lvm_fs                   = var.local_lvm_fs
+      local_lvm_stripe_kb            = var.local_lvm_stripe_kb
+      install_efa_userspace          = var.install_efa_userspace
+      efa_userspace_snippet          = module.catalog.efa_userspace_snippet
+      nvidia_open_kmod_fixup_snippet = module.catalog.nvidia_open_kmod_fixup_snippet
+      ebs_data_disk_detect_snippet   = file("${path.module}/templates/detect-ebs-disk.sh")
+      node_management                = var.node_management
+      extra_node_labels              = local.ng_extra_node_labels[k]
+      node_taints                    = local.ng_node_taints[k]
+      containerd_storage             = local.ng_containerd_storage[k]
     })
   }
 }

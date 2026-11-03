@@ -210,6 +210,20 @@ gpu_nodegroups = [
   # },
 ]
 
+# Karpenter GPU NodePools (needs install_karpenter = true). One pool per
+# instance type; spot interruptions handled by Karpenter's interruption queue.
+# karpenter_gpu_nodepools = [
+#   {
+#     name           = "p6-b300-spot"
+#     instance_type  = "p6-b300.48xlarge"
+#     capacity_types = ["spot"]
+#     zones          = ["ap-south-2c"]
+#     max_nodes      = 1
+#     # instance_store_policy = "RAID0"   # default; "" = containerd on root EBS
+#     # consolidate_after     = "1h"      # empty-node removal; "Never" to keep
+#   },
+# ]
+
 # Default containerd backing store for GPU nodegroups that don't set
 # containerd_storage: "ebs" (gp3 data volume + LVM) or "instance_store"
 # (nodeadm localStorage RAID0 over all NVMe; ephemeral; no data volume;

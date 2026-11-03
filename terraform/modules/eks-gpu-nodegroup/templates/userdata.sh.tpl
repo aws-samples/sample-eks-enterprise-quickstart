@@ -11,50 +11,7 @@ set -ex
 exec > >(tee /var/log/gpu-node-bootstrap.log)
 exec 2>&1
 
-# g7 (10de:2c3a) open-kmod fixup: the AMI's nvidia-open supported-devices
-# allowlist is missing the RTX PRO 4500 Server Edition PCI ID, so the
-# proprietary kmod gets loaded — Blackwell requires the open kmod and all
-# GPUs fail with RmInitAdapter 0x22:0x56:897. Appending the ID here lets
-# the AMI's own nvidia-kmod-load.service (After=network-online, i.e. always
-# after this boothook) pick the open kmod itself; non-g7 instance types skip
-# the whole block via the lspci gate.
-#
-# UPSTREAM STATUS (checked 2026-08-20): awslabs/amazon-eks-ami#2768 was
-# closed 2026-07-22 WITHOUT adding the ID to the 580 list. 0x2C3A ships only
-# in nvidia-open-supported-devices-595.txt, and AWS stated they "don't plan
-# to look into support for the same on 580". The default EKS NVIDIA AMI is
-# still 580 (v20260810 = 580.159.03, v20260818 = 580.178.04) and SSM
-# publishes no 595 variant, so this block does NOT auto-no-op today — it is
-# load-bearing for every g7 node launched on the default AMI. Empirically
-# the 580 open kmod does drive this GPU (verified on g7.48xlarge / EKS 1.34:
-# 8 GPUs, open kmod, Dual MIT/GPL), but that combination is not AWS-
-# supported. AWS's supported path is a custom 595 AMI — see
-# awslabs/amazon-eks-ami doc/usage/g7-ami.md, then point
-# var.gpu_custom_ami_id at it. NOTE 595 is incompatible with P3 / P3dn /
-# G6f, so a 595 AMI cannot serve a mixed fleet; keep those on 580 in a
-# separate nodegroup. The block self-disables once a default AMI ships
-# driver >= 595 (its allowlist already contains 0x2C3A).
-# ⚠️ Never `systemctl start` a service that is After=network-online from a
-# boothook — network-online waits for cloud-init, which waits for this
-# script: three-way deadlock, the instance never finishes booting.
-echo "=== NVIDIA open-kmod fixup (g7 / 2C3A) ==="
-SUPPORTED_LIST=$(ls /etc/eks/nvidia-open-supported-devices-*.txt 2>/dev/null | head -1)
-if [ -n "$SUPPORTED_LIST" ] && lspci -n -d 10de: 2>/dev/null | grep -qi "2c3a"; then
-  grep -qi "^0x2C3A" "$SUPPORTED_LIST" || \
-    echo "0x2C3A  NVIDIA RTX PRO 4500 Blackwell" >> "$SUPPORTED_LIST"
-  REBOOT_MARKER=/var/lib/nvidia-open-fixup-rebooted
-  if lsmod | grep -q "^nvidia " && modinfo nvidia 2>/dev/null | grep -q "^license:.*NVIDIA$"; then
-    if [ ! -f "$REBOOT_MARKER" ]; then
-      echo "Proprietary kmod on Blackwell — one-shot reboot to reload as nvidia-open"
-      touch "$REBOOT_MARKER"
-      shutdown -r now
-      exit 0
-    else
-      echo "ERROR: proprietary kmod still loaded after fixup reboot — manual intervention needed"
-    fi
-  fi
-fi
-
+${nvidia_open_kmod_fixup_snippet}
 %{ if containerd_storage == "ebs" ~}
 echo "=== Starting GPU Node LVM Setup ==="
 
@@ -347,87 +304,7 @@ fi
 # checked explicitly and failures only WARN — containers that bundle their
 # own libfabric (most NCCL images) still work without /opt/amazon/efa.
 %{ if install_efa_userspace }
-if [ ! -x /opt/amazon/efa/bin/fi_info ]; then
-  EFA_PKGS_RECORD=/opt/amazon/efa_installed_packages
-  EFA_FALLBACK_VERSION="${ efa_installer_version != "" ? efa_installer_version : "latest" }"
-  AMI_EFA_VERSION=""
-  if [ -f "$EFA_PKGS_RECORD" ]; then
-    AMI_EFA_VERSION=$(sed -n 's/^# EFA installer version: *\([0-9][0-9.]*\).*$/\1/p' "$EFA_PKGS_RECORD" | head -n 1)
-  fi
-  if [[ "$AMI_EFA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    EFA_VERSION="$AMI_EFA_VERSION"
-    echo "EFA installer version $EFA_VERSION (from AMI record $EFA_PKGS_RECORD)"
-    if [ "$EFA_FALLBACK_VERSION" != "$EFA_VERSION" ]; then
-      echo "NOTE: efa_installer_version=$EFA_FALLBACK_VERSION not used — AMI record wins so kmod/rdma-core/libfabric stay on one release"
-    fi
-  else
-    EFA_VERSION="$EFA_FALLBACK_VERSION"
-    echo "WARN: no EFA installer version recorded in $EFA_PKGS_RECORD; falling back to efa_installer_version=$EFA_VERSION (kmod and userspace may come from different releases)"
-  fi
-
-  # Runs in a subshell (cd + early returns stay contained). Each step is
-  # checked explicitly because `set -e` is suspended inside `( ... ) ||`.
-  efa_userspace_install() {
-    local base=https://efa-installer.amazonaws.com
-    local tarball="aws-efa-installer-$EFA_VERSION.tar.gz"
-    local rc=0
-    cd "$EFA_WORKDIR" || return 1
-    echo "=== Installing EFA userspace ($tarball, --skip-kmod) ==="
-    if ! { curl -fsSLO "$base/$tarball" && curl -fsSLO "$base/$tarball.sig" && curl -fsSLO "$base/aws-efa-installer.key"; }; then
-      echo "ERROR: failed to download $tarball (+ .sig / signing key) from $base"
-      return 1
-    fi
-    # AL2023 ships gnupg2-minimal: no gpg-agent (so `gpg --import` fails with
-    # "can't connect to the gpg-agent"), no gpgv, no --trust-model. Verify
-    # against a dearmored keyring file instead — neither step needs the agent.
-    # (The AMI build swaps in gnupg2-full for its import; we avoid a boot-time
-    # dnf dependency.) Verified on gnupg2-minimal 2.3.7 (AL2023 EKS AMI).
-    mkdir -m 700 "$EFA_WORKDIR/gnupg" || return 1
-    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --yes --dearmor -o "$EFA_WORKDIR/efa-keyring.gpg" aws-efa-installer.key; then
-      echo "ERROR: failed to read the EFA signing key"
-      return 1
-    fi
-    # VALIDSIG's last field is the primary-key fingerprint of the signer.
-    if ! GNUPGHOME="$EFA_WORKDIR/gnupg" gpg --batch --no-default-keyring --keyring "$EFA_WORKDIR/efa-keyring.gpg" \
-        --status-fd 1 --verify "$tarball.sig" "$tarball" 2>/dev/null \
-        | grep -Eq '^\[GNUPG:\] VALIDSIG .* 4E9091BCBB97A96B26B15E59A05480B1DD2D3CCC$'; then
-      echo "ERROR: $tarball is not validly signed by the AWS EFA key — refusing to run the installer"
-      return 1
-    fi
-    if ! tar -xf "$tarball"; then
-      echo "ERROR: failed to extract $tarball"
-      return 1
-    fi
-    rm -f "$tarball"
-    cd aws-efa-installer || return 1
-    # Full log kept on disk; the exit code is the installer's own (piping
-    # straight into `tail` would report tail's status and hide failures).
-    ./efa_installer.sh -y --skip-kmod > /var/log/efa-installer.log 2>&1 || rc=$?
-    tail -n 30 /var/log/efa-installer.log
-    if [ "$rc" -ne 0 ]; then
-      echo "WARN: efa_installer.sh exited $rc (full log: /var/log/efa-installer.log)"
-    fi
-    return "$rc"
-  }
-
-  # /tmp is tmpfs on AL2023 and the tarball is ~650 MB: always clean up.
-  if EFA_WORKDIR=$(mktemp -d /tmp/efa-installer.XXXXXX); then
-    ( efa_userspace_install ) || \
-      echo "WARN: EFA userspace install did not complete; containers with their own libfabric will still work"
-    rm -rf "$EFA_WORKDIR"
-  else
-    echo "WARN: mktemp failed; skipping EFA userspace install"
-  fi
-
-  if [ -x /opt/amazon/efa/bin/fi_info ]; then
-    echo "EFA userspace installed at /opt/amazon/efa/"
-    echo "  installer release : $(sed -n 's/^# EFA installer version: *//p' "$EFA_PKGS_RECORD" 2>/dev/null | head -n 1)"
-    echo "  efa kmod          : $(cat /sys/module/efa/version 2>/dev/null || modinfo -F version efa 2>/dev/null || echo unknown)"
-    echo "  libfabric         : $(/opt/amazon/efa/bin/fi_info --version 2>/dev/null | head -n 1)"
-    rpm -q rdma-core libibverbs libfabric-aws 2>/dev/null || true
-  fi
-fi
-%{ endif }
+${efa_userspace_snippet}%{ endif }
 
 echo "=== GPU Node Bootstrap Complete ==="
 
