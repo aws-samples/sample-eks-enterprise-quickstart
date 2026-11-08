@@ -824,7 +824,7 @@ run "safe_destroy_covers_neuron" {
     error_message = "safe-destroy.sh uninstalls the Neuron release from kube-system (NS); update the script if the namespace changes."
   }
   assert {
-    condition     = strcontains(file("../../scripts/safe-destroy.sh"), "delete daemonset ${kubernetes_daemon_set_v1.efa_device_plugin[0].metadata[0].name} ")
+    condition     = length(regexall("(?m)^\\s*kdelete \"[^\"]*\" daemonset ${kubernetes_daemon_set_v1.efa_device_plugin[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0
     error_message = "terraform/scripts/safe-destroy.sh must pre-delete the Neuron EFA DaemonSet (${kubernetes_daemon_set_v1.efa_device_plugin[0].metadata[0].name})."
   }
   assert {
@@ -836,11 +836,11 @@ run "safe_destroy_covers_neuron" {
   }
   assert {
     condition = alltrue([
-      strcontains(file("../../scripts/safe-destroy.sh"), "delete daemonset ${kubernetes_daemon_set_v1.neuron_monitor[0].metadata[0].name} "),
-      strcontains(file("../../scripts/safe-destroy.sh"), "delete service ${kubernetes_service_v1.neuron_monitor[0].metadata[0].name} "),
-      strcontains(file("../../scripts/safe-destroy.sh"), "delete clusterrolebinding ${kubernetes_cluster_role_binding_v1.neuron_monitor[0].metadata[0].name} "),
-      strcontains(file("../../scripts/safe-destroy.sh"), "delete clusterrole ${kubernetes_cluster_role_v1.neuron_monitor[0].metadata[0].name} "),
-      strcontains(file("../../scripts/safe-destroy.sh"), "delete serviceaccount ${kubernetes_service_account_v1.neuron_monitor[0].metadata[0].name} "),
+      length(regexall("(?m)^\\s*kdelete \"[^\"]*\" daemonset ${kubernetes_daemon_set_v1.neuron_monitor[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0,
+      length(regexall("(?m)^\\s*kdelete \"[^\"]*\" service ${kubernetes_service_v1.neuron_monitor[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0,
+      length(regexall("(?m)^\\s*kdelete \"[^\"]*\" clusterrolebinding ${kubernetes_cluster_role_binding_v1.neuron_monitor[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0,
+      length(regexall("(?m)^\\s*kdelete \"[^\"]*\" clusterrole ${kubernetes_cluster_role_v1.neuron_monitor[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0,
+      length(regexall("(?m)^\\s*kdelete \"[^\"]*\" serviceaccount ${kubernetes_service_account_v1.neuron_monitor[0].metadata[0].name}( |$)", file("../../scripts/safe-destroy.sh"))) > 0,
     ])
     error_message = "terraform/scripts/safe-destroy.sh must pre-delete the neuron-monitor DaemonSet / Service / ClusterRoleBinding / ClusterRole / ServiceAccount."
   }

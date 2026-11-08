@@ -205,7 +205,13 @@ else
       # Other releases are independent but share the same cluster.
       # Added 2026-05-22: dcgm-exporter, node-problem-detector (standard mode);
       # gpu-operator lives in its own namespace and is handled below.
-      for release in nvidia-device-plugin dcgm-exporter node-problem-detector aws-load-balancer-controller cluster-autoscaler aws-fsx-csi-driver; do
+      # Added with Neuron support: neuron-helm-chart (modules/eks-neuron-stack,
+      # install_neuron_stack = true) — installed after the core addons, so it
+      # goes before aws-load-balancer-controller / cluster-autoscaler.
+      # neuron-monitor-servicemonitor (bedag/raw, install_neuron_monitor +
+      # neuron_monitor_service_monitor) goes first: it depends on the Neuron
+      # stack's Service.
+      for release in nvidia-device-plugin dcgm-exporter node-problem-detector neuron-monitor-servicemonitor neuron-helm-chart aws-load-balancer-controller cluster-autoscaler aws-fsx-csi-driver; do
         helm_uninstall "${release}" 5m
       done
 
@@ -227,6 +233,19 @@ else
       kdelete "clusterrolebinding/gpu-health-check" clusterrolebinding gpu-health-check --timeout=30s
       kdelete "clusterrole/gpu-health-check" clusterrole gpu-health-check --timeout=30s
       kdelete "sa/gpu-health-check" serviceaccount gpu-health-check -n "${NS}" --timeout=30s
+
+      # Neuron-node EFA device plugin (kubernetes_daemon_set_v1 in
+      # modules/eks-neuron-stack; separate from the GPU EFA DaemonSet).
+      kdelete "ds/aws-efa-k8s-device-plugin-neuron" daemonset aws-efa-k8s-device-plugin-neuron -n "${NS}" --timeout=60s
+
+      # neuron-monitor (install_neuron_monitor; kubernetes_* resources in
+      # modules/eks-neuron-stack). RBAC objects exist only with
+      # neuron_monitor_pod_attribution; --ignore-not-found covers both cases.
+      kdelete "ds/neuron-monitor" daemonset neuron-monitor -n "${NS}" --timeout=60s
+      kdelete "svc/neuron-monitor" service neuron-monitor -n "${NS}" --timeout=30s
+      kdelete "clusterrolebinding/neuron-monitor" clusterrolebinding neuron-monitor --timeout=30s
+      kdelete "clusterrole/neuron-monitor" clusterrole neuron-monitor --timeout=30s
+      kdelete "sa/neuron-monitor" serviceaccount neuron-monitor -n "${NS}" --timeout=30s
 
       echo "==> Deleting ServiceAccounts that Terraform won't clean by itself..."
       # <sa>:<owning release>. An SA is deleted only once its release is
