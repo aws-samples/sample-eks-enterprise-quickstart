@@ -318,15 +318,33 @@ locals {
   alb_iam_policy_url  = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${var.alb_controller_app_version}/docs/install/${local.alb_iam_policy_file}"
 
   alb_iam_policy_bundled = local.alb_iam_policy_file != "" && fileexists(local.alb_iam_policy_path)
+
+  alb_iam_policy_unknown_partition_msg = "No AWS Load Balancer Controller IAM policy variant is known for partition '${data.aws_partition.current.partition}'. Upstream ships iam_policy{,_cn,_us-gov,_iso,_isob}.json; add a mapping in alb_iam_policy_file_by_partition (modules/eks-addons/main.tf) for this partition."
 }
 
 data "http" "alb_iam_policy" {
-  count = var.alb_controller_iam_policy_source == "http" && local.alb_iam_policy_file != "" ? 1 : 0
+  # count must only depend on plan-time-known inputs. Everything derived from
+  # data.aws_partition (file name, URL) is UNKNOWN during the first plan of a
+  # fresh cluster: the root calls this module with depends_on on resources
+  # that don't exist yet, which defers all of its data sources to apply.
+  # Gating count on the partition lookup used to fail every fresh deploy in
+  # the default "http" mode with "Invalid count argument". The partition only
+  # feeds the URL; an unmapped partition is stopped by the precondition below
+  # before any request is made (an isolated partition likely can't reach
+  # GitHub at all, so a doomed fetch would hide the clear message).
+  count = var.alb_controller_iam_policy_source == "http" ? 1 : 0
   url   = local.alb_iam_policy_url
 
   retry {
     attempts     = 3
     min_delay_ms = 1000
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.alb_iam_policy_file != ""
+      error_message = local.alb_iam_policy_unknown_partition_msg
+    }
   }
 }
 
@@ -351,7 +369,7 @@ resource "aws_iam_policy" "alb_controller" {
   lifecycle {
     precondition {
       condition     = local.alb_iam_policy_file != ""
-      error_message = "No AWS Load Balancer Controller IAM policy variant is known for partition '${data.aws_partition.current.partition}'. Upstream ships iam_policy{,_cn,_us-gov,_iso,_isob}.json; add a mapping in alb_iam_policy_file_by_partition (modules/eks-addons/main.tf) for this partition."
+      error_message = local.alb_iam_policy_unknown_partition_msg
     }
     precondition {
       condition     = local.alb_iam_policy_file_ok
