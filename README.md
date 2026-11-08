@@ -2,7 +2,7 @@
 
 生产级 AWS EKS 集群自动化部署方案，支持私有 API 访问、LVM 存储配置、Pod Identity 认证。
 
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.35-326CE5?logo=kubernetes)](https://kubernetes.io/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.37-326CE5?logo=kubernetes)](https://kubernetes.io/)
 [![AWS](https://img.shields.io/badge/AWS-EKS-FF9900?logo=amazon-aws)](https://aws.amazon.com/eks/)
 [![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A51.6-7B42BC?logo=terraform)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/License-See%20LICENSE-informational)](LICENSE)
@@ -88,7 +88,7 @@ kubectl get nodes
 ### 集群架构
 
 ```
-EKS Cluster (Kubernetes 1.35)
+EKS Cluster (Kubernetes 1.37)
 ├── Control Plane (AWS 托管)
 │   └── 私有 API Endpoint (10.0.x.x)
 │
@@ -110,12 +110,12 @@ EKS Cluster (Kubernetes 1.35)
 
 | 组件 | 版本 | 用途 |
 |------|------|------|
-| Kubernetes | 1.35 | 容器编排 |
+| Kubernetes | 1.37（新集群默认；已有集群保持当前版本，见 terraform/README.md「Kubernetes version and upgrades」） | 容器编排 |
 | VPC CNI | v1.18.5 | Pod 网络 |
 | CoreDNS | v1.11.3 | DNS 解析 |
 | Pod Identity Agent | v1.3.4 | IAM 认证 |
 | EBS CSI Driver | v1.37.0 | 块存储 |
-| Cluster Autoscaler | v1.35.0 | 自动扩缩容 |
+| Cluster Autoscaler | v1.37.0（随 K8s minor 选择） | 自动扩缩容 |
 | AWS LB Controller | v2.13.0（helm chart 1.16.0） | 负载均衡 |
 | Metrics Server | v0.7.2 | 资源指标 |
 

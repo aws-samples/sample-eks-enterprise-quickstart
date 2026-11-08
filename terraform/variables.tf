@@ -54,8 +54,12 @@ variable "public_access_cidrs" {
 
 variable "k8s_version" {
   type        = string
-  description = "Kubernetes minor version (e.g. '1.35'). EKS picks the latest patch."
-  default     = "1.35"
+  description = "Kubernetes minor version (e.g. '1.37'); EKS picks the latest patch. null (default) = keep the running version of an existing cluster with this name, or 1.37 for a new cluster. An explicit value may only stay on or go one minor above the running version. See README \"Kubernetes version and upgrades\"."
+  default     = null
+  validation {
+    condition     = var.k8s_version == null || can(regex("^1\\.[0-9]+$", var.k8s_version))
+    error_message = "k8s_version must be null or a Kubernetes minor such as \"1.37\" (no patch number)."
+  }
 }
 
 variable "service_ipv4_cidr" {
@@ -304,8 +308,8 @@ variable "alb_controller_iam_policy_source" {
 
 variable "karpenter_version" {
   type        = string
-  default     = "1.12.1"
-  description = "Karpenter helm chart version (matches app version)."
+  default     = null
+  description = "Karpenter helm chart version (matches app version). null (default) = 1.12.1 when the cluster runs (or, for a new cluster, is created on) Kubernetes <= 1.35, else 1.15.1. For an existing cluster the default follows the RUNNING minor, so raising k8s_version never moves it; upgrading Karpenter on an existing cluster also needs its new CRDs (README \"Kubernetes version and upgrades\")."
 }
 
 # =====================================================================

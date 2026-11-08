@@ -94,6 +94,10 @@ locals {
     "1.33" = { chart = "9.46.6", image = "v1.33.0" }
     "1.34" = { chart = "9.47.0", image = "v1.34.0" }
     "1.35" = { chart = "9.57.0", image = "v1.35.0" }
+    # No chart ships appVersion 1.36: chart 9.60.0 (appVersion 1.37.0) with
+    # the v1.36.2 image keeps "image minor = cluster minor".
+    "1.36" = { chart = "9.60.0", image = "v1.36.2" }
+    "1.37" = { chart = "9.60.0", image = "v1.37.0" }
   }
   ca_chart_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { chart = "" }).chart
   ca_image_default = lookup(local.cluster_autoscaler_version_map, var.k8s_version, { image = "" }).image

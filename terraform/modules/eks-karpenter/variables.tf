@@ -2,7 +2,10 @@ variable "cluster_name" { type = string }
 variable "cluster_endpoint" { type = string }
 variable "cluster_security_group_id" { type = string }
 variable "region" { type = string }
-variable "karpenter_version" { type = string }
+variable "karpenter_version" {
+  type     = string
+  nullable = false # null would leave the chart unpinned
+}
 variable "ssh_public_key" {
   type    = string
   default = ""
