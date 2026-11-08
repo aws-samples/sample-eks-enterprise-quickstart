@@ -127,6 +127,9 @@ run "http_mode_govcloud_url" {
   }
 }
 
+# http mode: the unmapped partition is rejected by the precondition on the
+# data source itself, i.e. before any request goes out (count no longer
+# depends on the partition — see tests/alb_iam_policy_fresh_deploy).
 run "unknown_partition_fails_clearly" {
   command = plan
 
@@ -136,6 +139,25 @@ run "unknown_partition_fails_clearly" {
 
   variables {
     alb_controller_iam_policy_source = "http"
+  }
+
+  override_data {
+    target = data.aws_partition.current
+    values = { partition = "aws-unknown" }
+  }
+
+  expect_failures = [data.http.alb_iam_policy]
+}
+
+run "unknown_partition_fails_clearly_file_mode" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-addons"
+  }
+
+  variables {
+    alb_controller_iam_policy_source = "file"
   }
 
   override_data {
