@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Bash kept permanently** for runtime / ops tools that don't fit a declarative model:
 - `option_inspect_eks.sh` (post-apply 9-check health audit)
-- `option_verify_gpu_efa.sh` (NCCL benchmark)
+- `option_verify_gpu_efa.sh` (NCCL / nccom-test benchmark)
 - `option_show_nodegroup_topology.sh` (reads `topology.k8s.aws/...` labels at runtime)
 - `option_create_bastion.sh` (operator-driven bastion lifecycle)
 
@@ -56,7 +56,7 @@ Module-level toggles (`install_karpenter`, `install_efs_csi`, `install_fsx_csi`,
 # 9-check cluster health audit
 ./scripts/option_inspect_eks.sh
 
-# Cross-node NCCL benchmark (validates EFA + GPUDirect)
+# Cross-node NCCL / nccom-test benchmark (validates EFA + GPUDirect / Neuron; vendor auto-detected)
 ./scripts/option_verify_gpu_efa.sh
 
 # Print AWS-native topology labels per nodegroup
@@ -145,7 +145,8 @@ terraform/                  # Canonical infra-as-code (use this)
 ├── bootstrap-bastion/      # SSM-only bastion for private deploys
 ├── modules/                # vpc-endpoints / eks-cluster / eks-system-nodegroup /
 │                           # eks-addons / eks-csi-drivers / eks-karpenter /
-│                           # eks-gpu-nodegroup / eks-gpu-stack
+│                           # eks-gpu-nodegroup / eks-gpu-stack / eks-neuron-stack /
+│                           # gpu-instance-catalog / eks-addon-ecr-registry
 ├── assets/                 # static files referenced by modules
 │   ├── iam/                # alb-controller / fsx-csi IAM policy JSON
 │   └── karpenter/          # EC2NodeClass + NodePool YAML templates
@@ -155,7 +156,7 @@ scripts/                    # Operational tools (kept as bash)
 ├── 0_setup_env.sh                    # shared by ops tools and legacy
 ├── topology_inventory_lib.sh         # lib for topology / GPU verify
 ├── option_inspect_eks.sh             # 9-check post-apply health audit
-├── option_verify_gpu_efa.sh          # cross-node NCCL benchmark
+├── option_verify_gpu_efa.sh          # cross-node NCCL / nccom-test benchmark
 ├── option_show_nodegroup_topology.sh # print AWS-native topology labels
 ├── option_create_bastion.sh          # operator-driven bastion lifecycle
 └── legacy/                           # deprecated bash deployment pipeline
@@ -250,10 +251,13 @@ responsibility:
   - p6-b300.48xlarge: 17 ENIs (1 primary + 16 EFA-only)
   - g7e.48xlarge: 4 ENIs (1 primary + 3 EFA-only)
 - Pricing options (mutually exclusive — choose ONE): OD / Spot / ODCR / CB
-- Alternative: Karpenter GPU NodePools (`karpenter_gpu_nodepools`, needs `install_karpenter`) — one EC2NodeClass+NodePool per instance type; EFA `networkInterfaces` from the shared `modules/gpu-instance-catalog` (also holds the g7 fixup + EFA userspace boothook used by both paths); `instanceStorePolicy: RAID0`; spot interruptions via Karpenter's SQS queue
+- Alternative: Karpenter GPU NodePools (`karpenter_gpu_nodepools`, needs `install_karpenter`) — one EC2NodeClass+NodePool per instance type; EFA `networkInterfaces` from the shared `modules/gpu-instance-catalog` (also holds the g7 fixup + EFA userspace boothook used by both paths); `instanceStorePolicy: RAID0`; spot interruptions via Karpenter's SQS queue; trn*/inf* pools auto-detected via the catalog (workload-type=neuron, aws.amazon.com/neuron taint + device limit, Neuron AMI via karpenter_neuron_ami_selector chain, EFA boothook only; needs install_neuron_stack)
 - containerd storage per NG (`gpu_containerd_storage` / `gpu_nodegroups[].containerd_storage`): `ebs` (default — gp3 data volume + LVM + Instance Store scratch) or `instance_store` (nodeadm localStorage RAID0 over all NVMe; no data volume; mutually exclusive with `gpu_enable_local_lvm`; Terraform only)
 - Node labels: `workload-type=gpu`, `gpu-instance-type=<type>`, `purchase-option=<od|spot|odcr|cb>`
 - Taints: `nvidia.com/gpu:NoSchedule`
+- AWS Neuron (Trainium/Inferentia, Terraform only): `gpu_type` may be `trn*`/`inf*`; vendor detected by NAME in `modules/gpu-instance-catalog` (`neuron_instance_type_regex`, `vendor_by_instance_type`, `accelerator_profiles`; LT precondition cross-checks EC2 `neuron_devices`). Neuron NGs get `workload-type=neuron` + taint `aws.amazon.com/neuron=true:NoSchedule`, the x86_64-only AMI `/aws/service/eks/optimized-ami/<k8s>/amazon-linux-2023/x86_64/neuron/...` (`neuron_ami_release_version` — null inherits `gpu_ami_release_version` — / `neuron_custom_ami_id`), no NVIDIA containerd overlay / g7 fixup, and CA hints `resources/aws.amazon.com/neuron` (devices) + `aws.amazon.com/neuroncore` (LNC-aware: trn2.48xl = 64) + `vpc.amazonaws.com/efa`. EFA: trn2.48xlarge 16, trn1n.32xlarge 16, trn1.32xlarge 8, trn2.3xlarge 1. AMI resolved per NG (vendor × arch) so NVIDIA and Neuron NGs coexist; NVIDIA-only configs must stay zero-diff (golden hashes in `terraform/tests/gpu_containerd_storage`)
+- Neuron caveats: `trn2u.48xlarge` is unsupported (EC2 publishes no NeuronInfo → LT precondition rejects it); Capacity Blocks (`cb`) never take a placement group (EC2 rejects it; LT precondition fails a Neuron `cb` NG that would get a cluster PG; for NVIDIA `cb` NGs it is only a `check` warning, since an unchanged NVIDIA entry must keep planning — a pre-existing trn*/inf* entry is re-rendered as Neuron on upgrade anyway and could never launch); trn2 regions vary (e.g. us-east-2, ap-south-2; not us-east-1) — check `describe-instance-type-offerings`; the boothook's containerd + kubelet (re)start is NVIDIA-only — on Neuron it started kubelet before nodeadm-run's `instance_store` RAID0 bind mount and left DaemonSet pods (device plugin) on a stale `/var/lib/kubelet` (`aws.amazon.com/neuron` = 0; found live on trn2, regression run `neuron_instance_store_no_early_kubelet`). NVIDIA `instance_store` NGs still carry that restart (zero-diff) and are likely exposed to the same race — not yet verified live (tracked in issue #27)
+- Upgrading an existing deployment to the Neuron change: re-run `terraform init` (same `-backend-config`) to install the new local modules (`eks-neuron-stack`, `eks-addon-ecr-registry`) — otherwise `plan` fails with "Module not installed" even though `eks_neuron_stack` is `count = 0`. No new providers; NVIDIA-only tfvars should then plan to No changes (an NVIDIA `cb` NG with `placement_group = "cluster"` + single subnet additionally warns via `check.cb_nodegroups_without_placement_group`; fixing it with `placement_group = "none"` destroys the PG and creates a new LT version). Existing trn*/inf* `karpenter_gpu_nodepools` entries are re-rendered as Neuron pools (label/taint/limit/userData/EFA NICs/AMI change → Karpenter drift replaces their nodes; set `install_neuron_stack`); a Neuron `ami-` id previously in `karpenter_gpu_ami_selector` no longer reaches them — move it to `karpenter_neuron_ami_selector` / `neuron_custom_ami_id` first; a `trn2u.48xlarge` pool now fails the plan, and Neuron pools need `karpenter_version >= 1.11` for EFA types (`>= 1.1` otherwise) — bump a pinned older Karpenter first. Existing trn*/inf* `gpu_nodegroups` entries (free-form `gpu_type`, previously rendered with the NVIDIA AMI/label/taint) become Neuron NGs: Neuron SSM AMI / `neuron_custom_ami_id` (`gpu_custom_ami_id` no longer applies — move it first), `workload-type=neuron` + `aws.amazon.com/neuron` taint, new CA tags → new LT version, managed NG rolls; set `install_neuron_stack` first; a `trn2u.48xlarge` entry or a `cb` + `placement_group = "cluster"` + single-subnet entry now fails the plan (use `placement_group = "none"`)
 
 **Layer 2 — `terraform/modules/eks-gpu-stack/` (K8s workloads; legacy: `scripts/legacy/option_install_gpu_stack.sh`)**
 - Two mutually-exclusive modes via `gpu_stack_mode` (terraform) / `GPU_STACK_MODE` (legacy):
@@ -261,6 +265,14 @@ responsibility:
   - `operator`: NVIDIA GPU Operator (driver/toolkit/RDMA disabled) + EFA plugin
 - Terraform: switching mode triggers `terraform apply` to retire stale resources from the previous mode
 - Legacy: mode-switch protected by `GPU_STACK_FORCE_SWITCH=true` to auto-uninstall conflicting releases; auto-invoked from layer 1 by default; skip with `SKIP_GPU_STACK_AUTO_INSTALL=true`
+
+**Layer 2b — `terraform/modules/eks-neuron-stack/` (K8s workloads for Neuron nodes; Terraform only)**
+- Toggle `install_neuron_stack` — orthogonal to `gpu_stack_mode` (not a third mode; both stacks can be installed)
+- `neuron-helm-chart` (oci://public.ecr.aws/neuron, release `neuron-helm-chart`): device plugin on (`aws.amazon.com/neuron` / `neuroncore`) — upstream chart RBAC kept as-is: cluster-wide `nodes/proxy` get/list, `pods` update/patch, `nodes/status` patch + host `/run` rw mount (README "Privileges (device plugin)"); NPD / DRA / observer off; optional scheduler extension + `my-scheduler` (`install_neuron_scheduler`; then `neuron_kube_scheduler_image_tag` is required — chart default kube-scheduler v1.31 is out of skew; adds **ClusterIP** `kube-system/k8s-neuron-scheduler:12345`, plain HTTP, no auth, pod network only, called by `my-scheduler` for filter + **bind** — the extender binds pods / patches pods + nodes/status with its own cluster-wide RBAC; README has a NetworkPolicy example restricting ingress to the `my-scheduler` pods); mirror overrides for the chart and every image (device plugin, scheduler extender, kube-scheduler); `helm_replace_existing` does not adopt a deployed manual install — the docs install omits `--namespace` (release usually in `default`), so `helm list -A` to find it and `helm uninstall -n <ns>` before the first apply; `terraform/scripts/safe-destroy.sh` pre-uninstalls `neuron-helm-chart` + the Neuron EFA DS (and the neuron-monitor ServiceMonitor release + DS / Service / RBAC / SA)
+- Separate EFA DaemonSet `aws-efa-k8s-device-plugin-neuron` on `workload-type=neuron` nodes (the eks-gpu-stack EFA DS is untouched); EFA image registry map shared via `terraform/modules/eks-addon-ecr-registry`
+- Opt-in neuron-monitor exporter (`install_neuron_monitor`, default off; dcgm-exporter parity, no metrics backend): DaemonSet + **ClusterIP** Service `kube-system/neuron-monitor:8000` (plain HTTP, no auth, pod network only — no hostNetwork / hostPort / NodePort / LB), container **privileged** (must read every `/dev/neuron*`), host `/opt/aws` mounted read-only at `/opt-aws` (host LNC config); `neuron_monitor_service_monitor` (needs Prometheus Operator CRDs) and BETA `neuron_monitor_pod_attribution` (`get nodes/pods` only, never `nodes/proxy`) both off. ServiceMonitor uses the dcgm label schema (`honorLabels: false`, `exported_pod` / `exported_namespace` / `exported_container`) and blanks neuron-monitor's literal `"None"` on unattributed series
+- Neuron Observer (chart `observer.*`: hostNetwork `0.0.0.0:7001`, unauthenticated API with fault injection) is intentionally **not** managed — README warning
+- `scripts/option_verify_gpu_efa.sh` auto-detects Neuron nodes (`workload-type=neuron` / allocatable `aws.amazon.com/neuron`): `neuron-ls`, `fi_info -p efa`, single-node and `--multi` `nccom-test` over EFA in an official Neuron DLC; pods request whole `aws.amazon.com/neuron` devices (never `neuroncore` — LNC pitfall), IPC_LOCK only; `VERIFY_VENDOR` / `VERIFY_NEURON_IMAGE` / `VERIFY_NEURON_TIMEOUT_SEC` / `VERIFY_NEURON_COMM_PORT` / `VERIFY_NEURON_RUNTIME_UPGRADE` (default true: apt-upgrade runtime-lib/collectives/tools in-pod — the newest public training DLC, sdk2.30, fails `nrt_init` on the current EKS Neuron AMI driver 2.31.7). NVIDIA path unchanged. `option_inspect_eks.sh` adds Neuron allocatable / EFA / Trn quota checks only when Neuron nodes exist
 
 ## Testing and Validation
 

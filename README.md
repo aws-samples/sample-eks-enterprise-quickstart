@@ -137,15 +137,18 @@ EKS Cluster (Kubernetes 1.35)
 | `terraform/modules/eks-addons` | CoreDNS / Metrics / CA / ALB | 默认 |
 | `terraform/modules/eks-csi-drivers` | EBS（默认）/ EFS / FSx / S3 | `install_*_csi=true` |
 | `terraform/modules/eks-karpenter` | Karpenter + SQS 中断队列 | `install_karpenter=true` |
-| `terraform/modules/eks-gpu-nodegroup` | GPU MNG + EFA 多网卡 | `install_gpu_nodegroups=true` |
+| `terraform/modules/eks-gpu-nodegroup` | GPU / Neuron（Trainium·Inferentia）MNG + EFA 多网卡 | `install_gpu_nodegroups=true` |
 | `terraform/modules/eks-gpu-stack` | nvidia 设备插件 / GPU Operator | `install_gpu_stack=true` |
+| `terraform/modules/eks-neuron-stack` | Neuron 设备插件 / 调度扩展 / EFA / neuron-monitor 指标 | `install_neuron_stack=true` |
+| `terraform/modules/gpu-instance-catalog` | GPU / Neuron 实例目录（EFA 网卡数、boothook），内部共享 | 自动 |
+| `terraform/modules/eks-addon-ecr-registry` | 各 region 的 EKS add-on ECR 账号映射，内部共享 | 自动 |
 
 **保留的运维脚本**：
 
 | 脚本 | 用途 | 执行位置 |
 |------|------|---------|
 | `scripts/option_inspect_eks.sh` | 集群健康 9 项检查 | VPC 内 |
-| `scripts/option_verify_gpu_efa.sh` | 跨节点 NCCL benchmark | VPC 内 |
+| `scripts/option_verify_gpu_efa.sh` | 跨节点 NCCL（NVIDIA）/ nccom-test（Neuron）benchmark，自动识别 | VPC 内 |
 | `scripts/option_show_nodegroup_topology.sh` | 打印 `topology.k8s.aws/...` 标签 | VPC 内 |
 | `scripts/option_create_bastion.sh` | 创建 SSM-only 堡垒机 | VPC 外 |
 | `examples/option_test_pod_scheduling.sh` | 测试 Pod 调度到系统节点 | VPC 内 |
@@ -315,7 +318,9 @@ eks-cluster-deployment/
 │   ├── modules/                            # vpc-endpoints / eks-cluster /
 │   │                                       # eks-system-nodegroup / eks-addons /
 │   │                                       # eks-csi-drivers / eks-karpenter /
-│   │                                       # eks-gpu-nodegroup / eks-gpu-stack
+│   │                                       # eks-gpu-nodegroup / eks-gpu-stack /
+│   │                                       # eks-neuron-stack / gpu-instance-catalog /
+│   │                                       # eks-addon-ecr-registry
 │   ├── assets/                             # 模块引用的静态文件
 │   │   ├── iam/                            # ALB / FSx IAM 策略 JSON
 │   │   └── karpenter/                      # NodePool / EC2NodeClass YAML
@@ -325,7 +330,7 @@ eks-cluster-deployment/
 │   ├── 0_setup_env.sh                      # 共享环境变量加载（ops + legacy 都用）
 │   ├── topology_inventory_lib.sh           # 共享库：读 AWS 原生拓扑标签
 │   ├── option_inspect_eks.sh               # 9 项集群健康检查
-│   ├── option_verify_gpu_efa.sh            # 跨节点 NCCL benchmark
+│   ├── option_verify_gpu_efa.sh            # 跨节点 NCCL / nccom-test benchmark
 │   ├── option_show_nodegroup_topology.sh   # 打印节点组拓扑标签
 │   ├── option_create_bastion.sh            # 创建堡垒机
 │   └── legacy/                             # ★ 已废弃的 bash 部署管线

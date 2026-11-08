@@ -246,7 +246,7 @@ eks-cluster-deployment/
 │   ├── 0_setup_env.sh                   # 环境变量加载（ops 与 legacy 共用）
 │   ├── topology_inventory_lib.sh        # 共享库：读 AWS 原生拓扑标签
 │   ├── option_inspect_eks.sh            # 9 项集群健康检查
-│   ├── option_verify_gpu_efa.sh         # 跨节点 NCCL benchmark
+│   ├── option_verify_gpu_efa.sh         # 跨节点 NCCL / nccom-test benchmark
 │   ├── option_show_nodegroup_topology.sh
 │   ├── option_create_bastion.sh
 │   └── legacy/                          # 已废弃的 bash 部署管线

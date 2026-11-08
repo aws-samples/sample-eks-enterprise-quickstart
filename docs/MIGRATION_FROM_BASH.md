@@ -22,7 +22,7 @@ old `scripts/legacy/` bash pipeline.
 | `option_install_gpu_nodegroups.sh` | `modules/eks-gpu-nodegroup` | Multi-NIC EFA via `dynamic network_interfaces`; OD/Spot/ODCR/CB declared per nodegroup |
 | `option_install_gpu_stack.sh` | `modules/eks-gpu-stack` | standard / operator mode dispatch |
 | `option_create_bastion.sh` (kept at `scripts/`) | also: `terraform/bootstrap-bastion/` | Both maintained — pick one |
-| `option_verify_gpu_efa.sh` (kept at `scripts/`) | (no TF equivalent) | NCCL benchmark; runs against an existing cluster |
+| `option_verify_gpu_efa.sh` (kept at `scripts/`) | (no TF equivalent) | NCCL (NVIDIA) / nccom-test (Neuron) benchmark; runs against an existing cluster |
 | `option_show_nodegroup_topology.sh` (kept at `scripts/`) | (no TF equivalent) | Reads `topology.k8s.aws/network-node-layer-N` labels at runtime |
 | `option_inspect_eks.sh` (kept at `scripts/`) | (no TF equivalent) | 9-check post-apply health audit |
 | `topology_inventory_lib.sh` (kept at `scripts/`) | (kept) | Used by ops tools |

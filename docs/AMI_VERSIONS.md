@@ -109,7 +109,7 @@ independent of the AMI matrix above.
 |---|---|---|---|
 | EFA kernel module + rdma-core | EKS GPU AMI (preinstalled by `efa_installer.sh --minimal` at AMI build time) | `gpu_ami_release_version` | follows AMI |
 | EFA userspace (libfabric-aws + openmpi5-aws + `fi_info`) | `https://efa-installer.amazonaws.com/aws-efa-installer-<v>.tar.gz` fetched (GPG-verified) in node userdata | **follows AMI** — `<v>` is read from the AMI's `/opt/amazon/efa_installed_packages`. `gpu_efa_installer_version` (Terraform) / `GPU_EFA_INSTALLER_VERSION` (bash) is only the fallback when that record is missing | AMI's release (fallback `1.48.0`) |
-| `aws-efa-k8s-device-plugin` DaemonSet | `<per-region EKS add-on ECR account>.dkr.ecr.<region>.<domain>/eks/aws-efa-k8s-device-plugin` (account map: `eks_addon_ecr_account_by_region` in `modules/eks-gpu-stack/main.tf`) | `efa_device_plugin_version` (Terraform) / `EFA_DEVICE_PLUGIN_VERSION` (bash) | `v0.5.19` |
+| `aws-efa-k8s-device-plugin` DaemonSet | `<per-region EKS add-on ECR account>.dkr.ecr.<region>.<domain>/eks/aws-efa-k8s-device-plugin` (account map: `eks_addon_ecr_account_by_region` in `modules/eks-addon-ecr-registry/main.tf`, shared by `eks-gpu-stack` and `eks-neuron-stack`) | `efa_device_plugin_version` (Terraform) / `EFA_DEVICE_PLUGIN_VERSION` (bash) | `v0.5.19` |
 
 Why userspace follows the AMI: the AMI build runs the `latest` installer
 with `--minimal` (kmod + rdma-core only), so the kernel side's version is
