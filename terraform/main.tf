@@ -141,9 +141,10 @@ module "eks_karpenter" {
 
   pod_identity_propagation_wait = var.pod_identity_propagation_wait
 
-  # GPU NodePools — same AMI pin / EFA userspace settings as the GPU nodegroups.
+  # GPU NodePools — same AMI pins / EFA userspace settings as the GPU nodegroups (per vendor).
   gpu_nodepools             = var.karpenter_gpu_nodepools
   gpu_ami_selector          = local.karpenter_gpu_ami_selector
+  neuron_ami_selector       = local.karpenter_neuron_ami_selector
   gpu_install_efa_userspace = var.gpu_install_efa_userspace
   gpu_efa_installer_version = var.gpu_efa_installer_version
 
@@ -156,6 +157,19 @@ locals {
     var.karpenter_gpu_ami_selector != "" ? var.karpenter_gpu_ami_selector :
     var.gpu_custom_ami_id != "" ? var.gpu_custom_ami_id :
     var.gpu_ami_release_version != "" ? "al2023@${var.gpu_ami_release_version}" :
+    "al2023@latest"
+  )
+
+  # Neuron pools: same inheritance as eks-gpu-nodegroup (null -> gpu_ami_release_version;
+  # NVIDIA and Neuron AMIs share release tags). An NVIDIA ami- id is never inherited.
+  # Explicit override > neuron custom AMI > NVIDIA alias override (only when
+  # neuron_ami_release_version is null) > pinned release > latest.
+  karpenter_neuron_ami_release = var.neuron_ami_release_version != null ? var.neuron_ami_release_version : var.gpu_ami_release_version
+  karpenter_neuron_ami_selector = (
+    var.karpenter_neuron_ami_selector != "" ? var.karpenter_neuron_ami_selector :
+    var.neuron_custom_ami_id != "" ? var.neuron_custom_ami_id :
+    var.neuron_ami_release_version == null && startswith(var.karpenter_gpu_ami_selector, "al2023@") ? var.karpenter_gpu_ami_selector :
+    local.karpenter_neuron_ami_release != "" ? "al2023@${local.karpenter_neuron_ami_release}" :
     "al2023@latest"
   )
 }
@@ -177,6 +191,10 @@ module "eks_gpu_nodegroup" {
   k8s_version               = var.k8s_version
   gpu_ami_release_version   = var.gpu_ami_release_version
   gpu_custom_ami_id         = var.gpu_custom_ami_id
+
+  # trn*/inf* nodegroups only (vendor auto-detected from gpu_type).
+  neuron_ami_release_version = var.neuron_ami_release_version
+  neuron_custom_ami_id       = var.neuron_custom_ami_id
 
   private_subnet_ids = var.private_subnet_ids
   gpu_nodegroups     = var.gpu_nodegroups
@@ -241,4 +259,71 @@ module "eks_gpu_stack" {
     module.eks_addons,
     module.eks_gpu_nodegroup,
   ]
+}
+
+# =====================================================================
+# Neuron K8s stack — Neuron device plugin / scheduler extension / EFA
+# =====================================================================
+# Orthogonal to gpu_stack_mode (NOT a third mode): Neuron nodes carry
+# workload-type=neuron + the aws.amazon.com/neuron taint, which no NVIDIA
+# component selects or tolerates, so eks-gpu-stack and eks-neuron-stack can
+# both be installed. The EFA device plugin for Neuron nodes is a separate
+# DaemonSet (aws-efa-k8s-device-plugin-neuron) so the eks-gpu-stack one is
+# untouched; it reuses the shared install_efa_device_plugin /
+# efa_device_plugin_version / efa_device_plugin_image settings.
+module "eks_neuron_stack" {
+  source = "./modules/eks-neuron-stack"
+  count  = var.install_neuron_stack ? 1 : 0
+
+  region                = var.aws_region
+  helm_replace_existing = var.helm_replace_existing
+
+  chart_repository                = var.neuron_helm_chart_repository
+  chart_version                   = var.neuron_helm_chart_version
+  device_plugin_image_repository  = var.neuron_device_plugin_image_repository
+  device_plugin_image_tag         = var.neuron_device_plugin_image_tag
+  install_scheduler               = var.install_neuron_scheduler
+  kube_scheduler_image_tag        = var.neuron_kube_scheduler_image_tag
+  scheduler_image_repository      = var.neuron_scheduler_image_repository
+  scheduler_image_tag             = var.neuron_scheduler_image_tag
+  kube_scheduler_image_repository = var.neuron_kube_scheduler_image_repository
+
+  system_node_label_key   = var.system_node_label_key
+  system_node_label_value = var.system_node_label_value
+
+  install_efa_device_plugin = var.install_efa_device_plugin
+  efa_device_plugin_version = var.efa_device_plugin_version
+  efa_device_plugin_image   = var.efa_device_plugin_image
+
+  install_monitor                = var.install_neuron_monitor
+  monitor_image                  = var.neuron_monitor_image
+  monitor_service_monitor        = var.neuron_monitor_service_monitor
+  monitor_service_monitor_labels = var.neuron_monitor_service_monitor_labels
+  monitor_pod_attribution        = var.neuron_monitor_pod_attribution
+
+  depends_on = [
+    module.eks_addons,
+    module.eks_gpu_nodegroup,
+  ]
+}
+
+# Advisory only (check blocks emit warnings, never fail plan/apply, and add
+# nothing to state): Neuron nodegroups without the Neuron stack join with no
+# aws.amazon.com/neuron / vpc.amazonaws.com/efa resources, so Neuron pods
+# stay Pending.
+check "neuron_nodegroups_have_neuron_stack" {
+  assert {
+    condition     = var.install_neuron_stack || !contains(try(values(module.eks_gpu_nodegroup[0].nodegroup_vendors), []), "neuron")
+    error_message = "gpu_nodegroups contains Neuron (trn*/inf*) nodegroups but install_neuron_stack = false — nodes will join without aws.amazon.com/neuron or vpc.amazonaws.com/efa. Set install_neuron_stack = true."
+  }
+}
+
+# Advisory (warning only, no state): Neuron Karpenter pools without the Neuron
+# stack launch billed nodes that never advertise aws.amazon.com/neuron /
+# vpc.amazonaws.com/efa (unless installed out-of-band, e.g. GitOps).
+check "karpenter_neuron_nodepools_have_neuron_stack" {
+  assert {
+    condition     = var.install_neuron_stack || !contains(try(values(module.eks_karpenter[0].gpu_nodepool_vendors), []), "neuron")
+    error_message = "karpenter_gpu_nodepools contains Neuron (trn*/inf*) pools but install_neuron_stack = false — Karpenter will launch nodes that never advertise aws.amazon.com/neuron or vpc.amazonaws.com/efa, so Neuron pods stay Pending on billed nodes (bounded by each pool's max_nodes). Set install_neuron_stack = true."
+  }
 }

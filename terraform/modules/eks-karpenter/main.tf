@@ -509,8 +509,30 @@ locals {
 #   - instanceStorePolicy RAID0: Karpenter renders nodeadm localStorage RAID0
 #     itself (mounted at /mnt/k8s-disks/0, same as the nodegroups'
 #     containerd_storage = "instance_store").
-#   - Labels workload-type=gpu + taint nvidia.com/gpu match what the GPU stack
-#     DaemonSets (device plugins, DCGM, health check) select/tolerate.
+#   - Vendor (nvidia | neuron) comes from the instance type NAME via
+#     module.gpu_catalog.vendor_by_instance_type, and the per-vendor node
+#     contract from module.gpu_catalog.accelerator_profiles:
+#       nvidia -> label workload-type=gpu, taint + limit nvidia.com/gpu —
+#                 what the eks-gpu-stack DaemonSets select/tolerate;
+#       neuron -> label workload-type=neuron, taint aws.amazon.com/neuron,
+#                 limit in whole aws.amazon.com/neuron devices — what the
+#                 eks-neuron-stack device plugin and
+#                 aws-efa-k8s-device-plugin-neuron select/tolerate.
+#     Vendor decisions are name-based so they are known at plan time:
+#     data.aws_ec2_instance_type is deferred to apply on a fresh cluster.
+#     Neuron pools get the Neuron AMI (var.neuron_ami_selector) and a
+#     boothook-only userData (EFA userspace; no NVIDIA containerd overlay,
+#     no g7 kmod fixup).
+#   - Neuroncore pitfall (NOT guardable here — pod requests are invisible to
+#     Terraform): Karpenter counts aws.amazon.com/neuroncore as devices x
+#     physical cores and ignores LNC. On trn2 that is devices x 8, while the
+#     device plugin advertises devices x 4 at the default LNC=2:
+#       trn2.48xlarge 128 vs 64 (requests of 65-128 never fit)
+#       trn2.3xlarge    8 vs 4  (requests of 5-8 never fit)
+#     Karpenter then launches a node the pod never fits on. trn1 / inf1 /
+#     inf2 (no LNC) are unaffected. Limits are therefore never set on
+#     neuroncore; workloads should request aws.amazon.com/neuron (whole
+#     devices).
 #   - Spot interruptions are handled by Karpenter's interruption queue
 #     (aws_sqs_queue.karpenter_interruption): the node is cordoned/drained on
 #     the 2-minute notice and a replacement is launched immediately.
@@ -518,6 +540,7 @@ locals {
 module "gpu_catalog" {
   source                = "../gpu-instance-catalog"
   efa_installer_version = var.gpu_efa_installer_version
+  instance_types        = [for p in var.gpu_nodepools : p.instance_type]
 }
 
 data "aws_ec2_instance_type" "gpu" {
@@ -534,6 +557,44 @@ locals {
     for t, d in data.aws_ec2_instance_type.gpu : t => (length(d.gpus) > 0 ? sum([for g in d.gpus : g.count]) : 0)
   }
 
+  # Static (name-based) vendor/profile — never derived from data.aws_ec2_instance_type
+  # (deferred to apply on a fresh cluster; mocks carry both gpus and neuron_devices).
+  gpu_pool_vendor     = { for n, p in local.gpu_pools : n => module.gpu_catalog.vendor_by_instance_type[p.instance_type] }
+  gpu_pool_profile    = { for n, v in local.gpu_pool_vendor : n => module.gpu_catalog.accelerator_profiles[v] }
+  gpu_has_neuron_pool = contains(values(local.gpu_pool_vendor), "neuron")
+  gpu_has_nvidia_pool = contains(values(local.gpu_pool_vendor), "nvidia")
+
+  # neuron_devices is a SET too (same caveat as gpus).
+  neuron_count_per_type = {
+    for t, d in data.aws_ec2_instance_type.gpu : t => (length(d.neuron_devices) > 0 ? sum([for x in d.neuron_devices : x.count]) : 0)
+  }
+
+  # Per-pool AMI: NVIDIA pools keep var.gpu_ami_selector (byte-identical to the
+  # pre-Neuron render), Neuron pools use var.neuron_ami_selector.
+  gpu_pool_ami_selector = { for n, v in local.gpu_pool_vendor : n => v == "neuron" ? var.neuron_ami_selector : var.gpu_ami_selector }
+  gpu_pool_ami_selector_terms = {
+    for n, s in local.gpu_pool_ami_selector : n => startswith(s, "ami-") ? [{ id = s }] : [{ alias = s }]
+  }
+
+  # Karpenter version floors for Neuron pools (NVIDIA pools have none, as
+  # before). Unparseable karpenter_version -> both floors pass.
+  #   - >= 1.1  every Neuron pool (conservative minimum): v1.0.x already
+  #             advertises aws.amazon.com/neuron for inf1 / inf2 (from EC2
+  #             InferenceAcceleratorInfo) and trn1 (hard-coded counts), but
+  #             NeuronInfo-based device counts / accelerator labels (needed
+  #             for trn2-class and newer types) and the
+  #             aws.amazon.com/neuroncore resource arrive in v1.1.0.
+  #   - >= 1.11 only Neuron pools that render EC2NodeClass networkInterfaces
+  #             (EFA: trn1.32xlarge / trn1n / trn2); the CRD field is new in
+  #             v1.11.0. inf1 / inf2 / trn1.2xlarge render none.
+  karpenter_version_mm             = try([for x in regex("^v?([0-9]+)\\.([0-9]+)", var.karpenter_version) : tonumber(x)], null)
+  karpenter_version_ok_for_neuron  = try(local.karpenter_version_mm[0] > 1 || (local.karpenter_version_mm[0] == 1 && local.karpenter_version_mm[1] >= 1), true)
+  karpenter_version_ok_for_efa_nic = try(local.karpenter_version_mm[0] > 1 || (local.karpenter_version_mm[0] == 1 && local.karpenter_version_mm[1] >= 11), true)
+
+  # Neuron AMI selector format: checked by a precondition only when a Neuron
+  # pool exists (the root always passes a derived value; see variables.tf).
+  neuron_ami_selector_valid = can(regex("^(al2023@(latest|v[0-9]{8})|ami-[0-9a-f]{8,17})$", var.neuron_ami_selector))
+
   gpu_pool_layout = {
     for n, p in local.gpu_pools : n => lookup(module.gpu_catalog.efa_layout, p.instance_type, module.gpu_catalog.efa_layout_default)
   }
@@ -547,10 +608,6 @@ locals {
       )
     )
   }
-
-  gpu_ami_selector_terms = (
-    startswith(var.gpu_ami_selector, "ami-") ? [{ id = var.gpu_ami_selector }] : [{ alias = var.gpu_ami_selector }]
-  )
 
   # Karpenter merges this MIME document with its own NodeConfig (cluster
   # details, kubelet flags, localStorage). The boothook re-runs every boot;
@@ -582,6 +639,25 @@ locals {
     "--==BOUNDARY==--\n",
   ])
 
+  # Neuron: boothook only — no NVIDIA containerd runtime overlay (nodeadm's
+  # default runc is what the Neuron AMI expects) and no g7 open-kmod fixup;
+  # mirrors eks-gpu-nodegroup (main.tf:394 + userdata.sh.tpl nvidia-only block).
+  # Karpenter appends its own NodeConfig part to this MIME document.
+  neuron_userdata = join("", [
+    "MIME-Version: 1.0\n",
+    "Content-Type: multipart/mixed; boundary=\"==BOUNDARY==\"\n\n",
+    "--==BOUNDARY==\n",
+    "Content-Type: text/cloud-boothook; charset=\"us-ascii\"\n\n",
+    "#!/bin/bash\n",
+    "# Karpenter Neuron NodePool bootstrap (modules/eks-karpenter)\n",
+    "set -ex\n",
+    "exec > >(tee -a /var/log/gpu-node-bootstrap.log)\n",
+    "exec 2>&1\n\n",
+    var.gpu_install_efa_userspace ? module.gpu_catalog.efa_userspace_snippet : "echo \"EFA userspace install disabled\"\n",
+    "\necho \"=== Neuron Node Bootstrap Complete ===\"\n\n",
+    "--==BOUNDARY==--\n",
+  ])
+
   gpu_ec2nodeclasses = [
     for n, p in local.gpu_pools : {
       apiVersion = "karpenter.k8s.aws/v1"
@@ -589,7 +665,7 @@ locals {
       metadata   = { name = "gpu-${n}" }
       spec = merge(
         {
-          amiSelectorTerms           = local.gpu_ami_selector_terms
+          amiSelectorTerms           = local.gpu_pool_ami_selector_terms[n]
           role                       = aws_iam_role.karpenter_node.name
           subnetSelectorTerms        = [{ tags = { "karpenter.sh/discovery" = var.cluster_name } }]
           securityGroupSelectorTerms = [{ tags = { "karpenter.sh/discovery" = var.cluster_name } }]
@@ -607,11 +683,11 @@ locals {
               deleteOnTermination = true
             }
           }]
-          userData = local.gpu_userdata
+          userData = local.gpu_pool_vendor[n] == "neuron" ? local.neuron_userdata : local.gpu_userdata
           tags     = { "gpu-instance-type" = p.instance_type }
         },
         p.instance_store_policy != "" ? { instanceStorePolicy = p.instance_store_policy } : {},
-        startswith(var.gpu_ami_selector, "ami-") ? { amiFamily = "AL2023" } : {},
+        startswith(local.gpu_pool_ami_selector[n], "ami-") ? { amiFamily = "AL2023" } : {},
         length(local.gpu_pool_network_interfaces[n]) > 0 ? { networkInterfaces = local.gpu_pool_network_interfaces[n] } : {},
       )
     }
@@ -626,7 +702,7 @@ locals {
         template = {
           metadata = {
             labels = {
-              "workload-type"     = "gpu"
+              "workload-type"     = local.gpu_pool_profile[n].workload_type
               "gpu-instance-type" = p.instance_type
             }
           }
@@ -639,16 +715,27 @@ locals {
               ],
               length(p.zones) > 0 ? [{ key = "topology.kubernetes.io/zone", operator = "In", values = p.zones }] : [],
             )
-            taints      = [{ key = "nvidia.com/gpu", value = "true", effect = "NoSchedule" }]
+            # {key, value, effect} from accelerator_profiles; yamlencode sorts
+            # keys, so the NVIDIA bytes equal the pre-Neuron literal.
+            taints      = [local.gpu_pool_profile[n].taint]
             expireAfter = p.expire_after
           }
         }
-        # Limit in GPUs when the type has them (so max_nodes nodes fit
-        # exactly), else in vCPUs.
+        # NVIDIA: limit in GPUs when the type has them (so max_nodes nodes
+        # fit exactly), else in vCPUs.
+        # Neuron: whole devices (== accelerator_profiles.neuron.device_resource).
+        # Never aws.amazon.com/neuroncore: on trn2 Karpenter counts devices x 8
+        # physical cores (128 on trn2.48xlarge, 8 on trn2.3xlarge) while the
+        # device plugin advertises devices x 4 at LNC=2 (64 / 4).
+        # Branch on the STATIC vendor, not on data (see gpu_pool_vendor).
         limits = (
-          local.gpu_count_per_type[p.instance_type] > 0
-          ? { "nvidia.com/gpu" = tostring(p.max_nodes * local.gpu_count_per_type[p.instance_type]) }
-          : { cpu = tostring(p.max_nodes * data.aws_ec2_instance_type.gpu[p.instance_type].default_vcpus) }
+          local.gpu_pool_vendor[n] == "neuron"
+          ? { "aws.amazon.com/neuron" = tostring(p.max_nodes * local.neuron_count_per_type[p.instance_type]) }
+          : (
+            local.gpu_count_per_type[p.instance_type] > 0
+            ? { "nvidia.com/gpu" = tostring(p.max_nodes * local.gpu_count_per_type[p.instance_type]) }
+            : { cpu = tostring(p.max_nodes * data.aws_ec2_instance_type.gpu[p.instance_type].default_vcpus) }
+          )
         )
         disruption = {
           consolidationPolicy = "WhenEmpty"
@@ -692,6 +779,57 @@ resource "helm_release" "karpenter_pools" {
         p.instance_store_policy != "RAID0" || data.aws_ec2_instance_type.gpu[p.instance_type].instance_storage_supported
       ])
       error_message = "gpu_nodepools: instance_store_policy = \"RAID0\" requires an instance type with Instance Store. Offending: ${join(", ", [for p in var.gpu_nodepools : "${p.name} (${p.instance_type})" if p.instance_store_policy == "RAID0" && !data.aws_ec2_instance_type.gpu[p.instance_type].instance_storage_supported])}. Set instance_store_policy = \"\" for those pools."
+    }
+    # Neuron by name but EC2 publishes no NeuronInfo (trn2u.48xlarge in
+    # ap-south-2 today; in regions where EC2 does not describe the type at all
+    # the data source read fails first with InvalidInstanceType): no
+    # aws.amazon.com/neuron limit can be derived, and Karpenter would not
+    # advertise aws.amazon.com/neuron capacity for it either.
+    precondition {
+      condition = alltrue([for n, p in local.gpu_pools :
+        local.gpu_pool_vendor[n] != "neuron" || local.neuron_count_per_type[p.instance_type] > 0
+      ])
+      error_message = "gpu_nodepools: ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "neuron" && local.neuron_count_per_type[p.instance_type] == 0])} are classified as Neuron by name (trn*/inf*) but EC2 reports no Neuron devices (e.g. trn2u.48xlarge publishes no NeuronInfo), so no aws.amazon.com/neuron limit can be derived. Unsupported until EC2 publishes NeuronInfo."
+    }
+    # Cross-check of the name-based vendor: a Neuron type the regex misses
+    # would be rendered with the NVIDIA contract (wrong taint/AMI/userData).
+    precondition {
+      condition = alltrue([for n, p in local.gpu_pools :
+        local.gpu_pool_vendor[n] != "nvidia" || length(data.aws_ec2_instance_type.gpu[p.instance_type].gpus) > 0 || length(data.aws_ec2_instance_type.gpu[p.instance_type].neuron_devices) == 0
+      ])
+      error_message = "gpu_nodepools: EC2 reports Neuron devices for ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "nvidia" && length(data.aws_ec2_instance_type.gpu[p.instance_type].gpus) == 0 && length(data.aws_ec2_instance_type.gpu[p.instance_type].neuron_devices) > 0])} but the name does not match neuron_instance_type_regex — extend modules/gpu-instance-catalog."
+    }
+    # Plan-time (variables only). Heuristic: catches one ami- id being shared
+    # by NVIDIA and Neuron pools (one of them must be on the wrong AMI); a
+    # different NVIDIA-derived id cannot be detected without an AMI lookup.
+    # Gated on BOTH vendors being present: with no NVIDIA pool,
+    # var.gpu_ami_selector is never rendered, so a leftover equal value (e.g.
+    # a Neuron ami- id copied rather than moved to karpenter_neuron_ami_selector)
+    # is harmless.
+    precondition {
+      condition     = !local.gpu_has_neuron_pool || !local.gpu_has_nvidia_pool || !startswith(var.neuron_ami_selector, "ami-") || var.neuron_ami_selector != var.gpu_ami_selector
+      error_message = "gpu_nodepools: Neuron pools ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "neuron"])} and NVIDIA pools ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "nvidia"])} would use the same custom AMI (${var.neuron_ami_selector}). NVIDIA and Neuron pools need different AMIs: if it is an NVIDIA AMI, point neuron_ami_selector (root: karpenter_neuron_ami_selector / neuron_custom_ami_id) at an amazon-eks-node-al2023-x86_64-neuron-* derived AMI or an al2023@ alias; if it is a Neuron AMI, change or clear gpu_ami_selector (root: karpenter_gpu_ami_selector / gpu_custom_ami_id) for the NVIDIA pools."
+    }
+    # Plan-time (variables only), gated on a Neuron pool existing so an
+    # NVIDIA-only config never fails on a value derived for Neuron (the root
+    # may build it from an ignored, malformed gpu_ami_release_version).
+    precondition {
+      condition     = !local.gpu_has_neuron_pool || local.neuron_ami_selector_valid
+      error_message = "gpu_nodepools: Neuron pools ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "neuron"])} resolve neuron_ami_selector = \"${var.neuron_ami_selector}\", which is not \"al2023@latest\", \"al2023@vYYYYMMDD\" or an \"ami-...\" id. At the root it comes from karpenter_neuron_ami_selector > neuron_custom_ami_id > karpenter_gpu_ami_selector (al2023@ alias only) > neuron_ami_release_version / gpu_ami_release_version (must be \"vYYYYMMDD\") — fix the one you set."
+    }
+    # Plan-time (variables only); NVIDIA-only configs are not affected.
+    precondition {
+      condition     = !local.gpu_has_neuron_pool || local.karpenter_version_ok_for_neuron
+      error_message = "gpu_nodepools: Neuron pools ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "neuron"])} require karpenter_version >= 1.1 (conservative minimum: NeuronInfo-based Neuron device counts / accelerator labels and the aws.amazon.com/neuroncore resource arrive in v1.1.0) — got ${var.karpenter_version}."
+    }
+    # Only Neuron pools that render networkInterfaces (EFA types); the catalog
+    # layout is static, so this is plan-time too. NVIDIA pools stay unguarded
+    # (pre-Neuron behaviour unchanged).
+    precondition {
+      condition = local.karpenter_version_ok_for_efa_nic || alltrue([for n, p in local.gpu_pools :
+        local.gpu_pool_vendor[n] != "neuron" || length(local.gpu_pool_network_interfaces[n]) == 0
+      ])
+      error_message = "gpu_nodepools: Neuron EFA pools ${join(", ", [for n, p in local.gpu_pools : "${n} (${p.instance_type})" if local.gpu_pool_vendor[n] == "neuron" && length(local.gpu_pool_network_interfaces[n]) > 0])} require karpenter_version >= 1.11 (EC2NodeClass networkInterfaces, new in v1.11.0) — got ${var.karpenter_version}. Neuron pools without EFA (inf1 / inf2 / trn1.2xlarge) are held to the general >= 1.1 Neuron minimum only."
     }
   }
 

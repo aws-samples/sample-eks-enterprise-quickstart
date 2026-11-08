@@ -23,3 +23,8 @@ output "gpu_node_role_arn" {
 output "gpu_security_group_id" {
   value = aws_security_group.gpu.id
 }
+
+output "nodegroup_vendors" {
+  description = "NG key -> accelerator vendor (nvidia | neuron), derived from gpu_type by modules/gpu-instance-catalog."
+  value       = local.ng_vendor
+}

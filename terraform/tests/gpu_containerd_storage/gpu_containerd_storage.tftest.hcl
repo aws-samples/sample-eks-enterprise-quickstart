@@ -208,3 +208,162 @@ run "self_managed_ca_gpu_resource_hint" {
     error_message = "self_managed GPU ASG must advertise the real GPU count (8) to Cluster Autoscaler, not 0."
   }
 }
+
+# ---------------------------------------------------------------------------
+# NVIDIA golden guards (added before Trainium/Neuron support landed).
+#
+# These pin the EXACT rendered bytes / maps an existing NVIDIA-only deployment
+# produces today, so any refactor of the nodegroup module that would change a
+# Launch Template (new LT version -> managed-NG rollout / ASG refresh), a
+# nodegroup label/taint, or a CA ASG tag fails CI instead of surfacing as a
+# surprise diff on a live cluster. If one of these fails, the change is NOT
+# backward compatible — fix the change, do not re-pin the hash.
+# ---------------------------------------------------------------------------
+run "nvidia_golden_managed" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-gpu-nodegroup"
+  }
+
+  assert {
+    condition     = sha256(base64decode(aws_launch_template.gpu["p5-48xlarge-od"].user_data)) == "90600e29b9636ff3bdf8a4befc4fdb362f165a116b82923dbcff52c901184dc1"
+    error_message = "managed NVIDIA user_data bytes changed — this would roll every existing GPU nodegroup."
+  }
+  assert {
+    condition     = aws_launch_template.gpu["p5-48xlarge-od"].image_id == "ami-0123456789abcdef0"
+    error_message = "NVIDIA LT image_id must come from data.aws_ssm_parameter.gpu_ami."
+  }
+  assert {
+    condition = aws_eks_node_group.gpu["p5-48xlarge-od"].labels == tomap({
+      workload-type     = "gpu"
+      gpu-instance-type = "p5.48xlarge"
+      purchase-option   = "od"
+    })
+    error_message = "NVIDIA managed nodegroup labels changed."
+  }
+  assert {
+    condition     = [for t in aws_eks_node_group.gpu["p5-48xlarge-od"].taint : "${t.key}=${t.value}:${t.effect}"] == ["nvidia.com/gpu=true:NO_SCHEDULE"]
+    error_message = "NVIDIA managed nodegroup taint changed."
+  }
+  assert {
+    condition = toset(keys(aws_autoscaling_group_tag.gpu)) == toset([
+      "p5-48xlarge-od-enabled",
+      "p5-48xlarge-od-owned",
+      "p5-48xlarge-od-instance-type",
+    ])
+    error_message = "NVIDIA managed-mode CA ASG tag set changed."
+  }
+  assert {
+    condition     = length(aws_launch_template.gpu["p5-48xlarge-od"].network_interfaces) == 32
+    error_message = "p5.48xlarge must keep its 32-NIC EFA layout."
+  }
+  assert {
+    condition     = data.aws_ssm_parameter.gpu_ami[0].name == "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/nvidia/recommended/image_id"
+    error_message = "NVIDIA recommended AMI SSM path changed."
+  }
+  # The Neuron SSM lookup must be gated off by has_neuron for NVIDIA-only
+  # input. Mocks answer any SSM name, so without this an ungated lookup
+  # (which on real AWS fails with ParameterNotFound wherever no Neuron AMI /
+  # inherited release tag exists) would go unnoticed.
+  assert {
+    condition     = length(data.aws_ssm_parameter.neuron_ami) == 0
+    error_message = "NVIDIA-only config must not read the Neuron AMI SSM parameter (has_neuron gate regressed)."
+  }
+}
+
+run "nvidia_golden_self_managed" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-gpu-nodegroup"
+  }
+
+  variables {
+    node_management = "self_managed"
+  }
+
+  assert {
+    condition     = sha256(base64decode(aws_launch_template.gpu["p5-48xlarge-od"].user_data)) == "5762559564a8b6d5aa1f3f9f70c8167141f295c47037d38dd573dc24114223b7"
+    error_message = "self_managed NVIDIA user_data bytes changed — this would refresh every existing GPU ASG's LT."
+  }
+  assert {
+    condition = { for t in aws_autoscaling_group.gpu["p5-48xlarge-od"].tag : t.key => t.value } == {
+      "k8s.io/cluster-autoscaler/enabled"                                       = "true"
+      "k8s.io/cluster-autoscaler/test-cluster"                                  = "owned"
+      "k8s.io/cluster-autoscaler/node-template/label/workload-type"             = "gpu"
+      "k8s.io/cluster-autoscaler/node-template/label/gpu-instance-type"         = "p5.48xlarge"
+      "k8s.io/cluster-autoscaler/node-template/label/purchase-option"           = "od"
+      "k8s.io/cluster-autoscaler/node-template/taint/nvidia.com/gpu"            = "true:NoSchedule"
+      "k8s.io/cluster-autoscaler/node-template/resources/nvidia.com/gpu"        = "8"
+      "k8s.io/cluster-autoscaler/node-template/resources/vpc.amazonaws.com/efa" = "32"
+      "Name"                                                                    = "test-cluster-gpu-p5-48xlarge-node"
+      "kubernetes.io/cluster/test-cluster"                                      = "owned"
+      "gpu-instance-type"                                                       = "p5.48xlarge"
+      "purchase-option"                                                         = "od"
+    }
+    error_message = "self_managed NVIDIA ASG tag map changed."
+  }
+  # The Neuron SSM lookup must be gated off by has_neuron for NVIDIA-only
+  # input. Mocks answer any SSM name, so without this an ungated lookup
+  # (which on real AWS fails with ParameterNotFound wherever no Neuron AMI /
+  # inherited release tag exists) would go unnoticed.
+  assert {
+    condition     = length(data.aws_ssm_parameter.neuron_ami) == 0
+    error_message = "NVIDIA-only config must not read the Neuron AMI SSM parameter (has_neuron gate regressed)."
+  }
+}
+
+run "nvidia_pinned_release_path" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-gpu-nodegroup"
+  }
+
+  variables {
+    gpu_ami_release_version = "v20261031"
+  }
+
+  assert {
+    condition     = data.aws_ssm_parameter.gpu_ami[0].name == "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/nvidia/amazon-eks-node-al2023-x86_64-nvidia-1.34-v20261031/image_id"
+    error_message = "NVIDIA pinned-release AMI SSM path changed."
+  }
+  # The Neuron SSM lookup must be gated off by has_neuron for NVIDIA-only
+  # input. Mocks answer any SSM name, so without this an ungated lookup
+  # (which on real AWS fails with ParameterNotFound wherever no Neuron AMI /
+  # inherited release tag exists) would go unnoticed.
+  assert {
+    condition     = length(data.aws_ssm_parameter.neuron_ami) == 0
+    error_message = "NVIDIA-only config must not read the Neuron AMI SSM parameter (has_neuron gate regressed)."
+  }
+}
+
+run "nvidia_custom_ami" {
+  command = plan
+
+  module {
+    source = "../../modules/eks-gpu-nodegroup"
+  }
+
+  variables {
+    gpu_custom_ami_id = "ami-0fedcba9876543210"
+  }
+
+  assert {
+    condition     = length(data.aws_ssm_parameter.gpu_ami) == 0
+    error_message = "gpu_custom_ami_id must skip the NVIDIA SSM lookup."
+  }
+  assert {
+    condition     = aws_launch_template.gpu["p5-48xlarge-od"].image_id == "ami-0fedcba9876543210"
+    error_message = "gpu_custom_ami_id must be used verbatim as the NVIDIA LT image_id."
+  }
+  # The Neuron SSM lookup must be gated off by has_neuron for NVIDIA-only
+  # input. Mocks answer any SSM name, so without this an ungated lookup
+  # (which on real AWS fails with ParameterNotFound wherever no Neuron AMI /
+  # inherited release tag exists) would go unnoticed.
+  assert {
+    condition     = length(data.aws_ssm_parameter.neuron_ami) == 0
+    error_message = "NVIDIA-only config must not read the Neuron AMI SSM parameter (has_neuron gate regressed)."
+  }
+}

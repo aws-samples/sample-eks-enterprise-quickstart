@@ -108,3 +108,65 @@ run "unknown_region_fails_clearly" {
   }
   expect_failures = [kubernetes_daemon_set_v1.efa_device_plugin]
 }
+
+# Zero-diff guard for Neuron support: the NVIDIA EFA DaemonSet keeps its exact
+# placement (workload-type=gpu + nvidia.com/gpu toleration) and identity.
+# Neuron nodes get a SEPARATE DaemonSet from modules/eks-neuron-stack.
+run "gpu_efa_ds_placement_unchanged" {
+  command = plan
+  module {
+    source = "../../modules/eks-gpu-stack"
+  }
+  variables {
+    region = "us-west-2"
+  }
+  assert {
+    condition     = kubernetes_daemon_set_v1.efa_device_plugin[0].spec[0].template[0].spec[0].node_selector == tomap({ "workload-type" = "gpu" })
+    error_message = "NVIDIA EFA DaemonSet must keep node_selector workload-type=gpu."
+  }
+  assert {
+    condition     = length(kubernetes_daemon_set_v1.efa_device_plugin[0].spec[0].template[0].spec[0].toleration) == 2
+    error_message = "NVIDIA EFA DaemonSet must keep exactly 2 tolerations."
+  }
+  assert {
+    condition     = [for t in kubernetes_daemon_set_v1.efa_device_plugin[0].spec[0].template[0].spec[0].toleration : t.key] == ["nvidia.com/gpu", "CriticalAddonsOnly"]
+    error_message = "NVIDIA EFA DaemonSet tolerations must stay nvidia.com/gpu + CriticalAddonsOnly."
+  }
+  assert {
+    condition     = kubernetes_daemon_set_v1.efa_device_plugin[0].metadata[0].name == "aws-efa-k8s-device-plugin-daemonset"
+    error_message = "NVIDIA EFA DaemonSet name must not change."
+  }
+  assert {
+    condition     = kubernetes_daemon_set_v1.efa_device_plugin[0].spec[0].selector[0].match_labels == tomap({ name = "aws-efa-k8s-device-plugin" })
+    error_message = "NVIDIA EFA DaemonSet selector must not change."
+  }
+}
+
+# The per-region account map lives in the shared eks-addon-ecr-registry
+# module (used by eks-gpu-stack and eks-neuron-stack); docs/AMI_VERSIONS.md
+# must point operators adding a region at that file, not the old location.
+run "ecr_account_map_doc_location" {
+  command = plan
+  module {
+    source = "../../modules/eks-gpu-stack"
+  }
+  variables {
+    region = "us-west-2"
+  }
+  assert {
+    condition = alltrue([
+      # Tie to the plan: the image resolved through the shared map.
+      startswith(kubernetes_daemon_set_v1.efa_device_plugin[0].spec[0].template[0].spec[0].container[0].image, "602401143452.dkr.ecr.us-west-2.amazonaws.com/"),
+      strcontains(file("../../modules/eks-addon-ecr-registry/main.tf"), "eks_addon_ecr_account_by_region = {"),
+      strcontains(file("../../../docs/AMI_VERSIONS.md"), "`eks_addon_ecr_account_by_region` in `modules/eks-addon-ecr-registry/main.tf`"),
+      !strcontains(file("../../../docs/AMI_VERSIONS.md"), "`eks_addon_ecr_account_by_region` in `modules/eks-gpu-stack/main.tf`"),
+      # .gitleaks.toml's account-ID allowlist comment points maintainers at the same map.
+      strcontains(file("../../../.gitleaks.toml"), "mirrored in modules/eks-addon-ecr-registry/main.tf eks_addon_ecr_account_by_region"),
+      !strcontains(file("../../../.gitleaks.toml"), "modules/eks-gpu-stack/main.tf eks_addon_ecr_account_by_region"),
+      # The root variable description names the real fallback, not "public ECR".
+      strcontains(file("../../variables.tf"), "Empty falls back to the per-region EKS add-on ECR registry"),
+      !strcontains(file("../../variables.tf"), "Empty falls back to the public ECR image map"),
+    ])
+    error_message = "docs/AMI_VERSIONS.md, .gitleaks.toml and the efa_device_plugin_image description must locate eks_addon_ecr_account_by_region in modules/eks-addon-ecr-registry/main.tf."
+  }
+}

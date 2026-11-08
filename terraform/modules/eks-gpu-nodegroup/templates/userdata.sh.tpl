@@ -235,6 +235,7 @@ modprobe lustre || true
 
 echo "=== boothook complete; NodeConfig is delivered as a separate node.eks.aws MIME part ==="
 
+%{ if accelerator_vendor == "nvidia" ~}
 # ============================================================
 # Force containerd + kubelet to reload config (SystemdCgroup=true)
 # ============================================================
@@ -277,6 +278,18 @@ if ! systemctl restart kubelet; then
   echo "WARN: kubelet restart failed; attempting plain start"
   systemctl start kubelet || echo "ERROR: kubelet failed to start"
 fi
+%{ else ~}
+# Neuron: no containerd/kubelet (re)start in the boothook. The reload above
+# exists only because the NVIDIA AMI's `nvidia-ctk runtime configure` drops
+# SystemdCgroup; the Neuron AMI has no such step, so nodeadm-run.service
+# starts containerd + kubelet with the final config. Starting kubelet here
+# would also register the node BEFORE nodeadm-run applies localStorage
+# (containerd_storage = "instance_store"): DaemonSet pods started in that
+# window keep hostPaths into the root-disk /var/lib/kubelet that the RAID0
+# bind mount then hides (seen live: neuron-device-plugin registering against a
+# stale kubelet.sock -> "context deadline exceeded", aws.amazon.com/neuron=0).
+echo "Neuron: containerd + kubelet are started by nodeadm-run.service"
+%{ endif ~}
 
 # ============================================================
 # EFA userspace (libfabric-aws + openmpi5-aws)
@@ -352,9 +365,11 @@ spec:
       - "--register-with-taints=${node_taints}"
 %{ endif ~}
 %{ endif ~}
+%{ if accelerator_vendor == "nvidia" ~}
   containerd:
     config: |
       [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia.options]
       SystemdCgroup = true
+%{ endif ~}
 
 --==BOUNDARY==--
