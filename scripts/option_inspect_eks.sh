@@ -203,6 +203,61 @@ else
   check "Spot P/G/H/T vCPU quota = $SPOT_INT" 1 "may not fit even single GPU node"
 fi
 
+# Neuron (Trainium / Inferentia) — only on clusters that have Neuron nodes,
+# so NVIDIA-only clusters keep the same output and PASS/WARN/FAIL counts.
+NEURON_NODES=$(kubectl get nodes -l workload-type=neuron -o name 2>/dev/null || true)
+if [ -n "$NEURON_NODES" ]; then
+  # Trn vCPU quotas (L-2C3B7624 / L-6B0D517C) only govern trn* capacity;
+  # Inferentia uses the separate Inf quotas, so an inf-only cluster must not
+  # get Trn quota WARNs. Any trn* Neuron node (Ready or not) counts.
+  HAS_TRN=0
+  for n in $NEURON_NODES; do
+    n=${n#node/}
+    N_IT=$(kubectl get node "$n" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null || true)
+    case "$N_IT" in trn*) HAS_TRN=1 ;; esac
+    N_READY=$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    [ "$N_READY" = "True" ] || continue
+    N_DEV=$(kubectl get node "$n" -o jsonpath='{.status.allocatable.aws\.amazon\.com/neuron}' 2>/dev/null || true)
+    N_EFA=$(kubectl get node "$n" -o jsonpath='{.status.allocatable.vpc\.amazonaws\.com/efa}' 2>/dev/null || true)
+    [[ "$N_DEV" =~ ^[0-9]+$ ]] || N_DEV=0
+    [[ "$N_EFA" =~ ^[0-9]+$ ]] || N_EFA=0
+    if [ "$N_DEV" -gt 0 ]; then
+      check "Neuron devices on $n (${N_IT:-?}) = $N_DEV" 0
+    else
+      check "Neuron device plugin not advertising on $n" 1 "kubectl get pods -n kube-system -o wide | grep neuron-device-plugin"
+    fi
+    case "$N_IT" in
+      # Neuron types with EFA rows in modules/gpu-instance-catalog (trn2u.48xlarge is rejected at plan time).
+      trn1.32xlarge|trn1n.32xlarge|trn2.48xlarge|trn2.3xlarge)
+        [ "$N_EFA" -gt 0 ] \
+          || check "EFA not advertised on $n ($N_IT)" 2 "check ds/aws-efa-k8s-device-plugin-neuron (install_efa_device_plugin)" ;;
+    esac
+  done
+
+  if [ "$HAS_TRN" -eq 1 ]; then
+    for q in "On-Demand:L-2C3B7624" "Spot:L-6B0D517C"; do
+      Q_VAL=$(aws service-quotas get-service-quota --service-code ec2 --quota-code "${q#*:}" --region "$AWS_REGION" --query 'Quota.Value' --output text 2>/dev/null || echo 0)
+      Q_INT=${Q_VAL%.*}
+      [[ "$Q_INT" =~ ^[0-9]+$ ]] || Q_INT=0
+      if [ "$Q_INT" -ge 192 ]; then
+        check "${q%%:*} Trn vCPU quota = $Q_INT (≥192 → fits trn2.48xlarge)" 0
+      elif [ "$Q_INT" -ge 128 ]; then
+        check "${q%%:*} Trn vCPU quota = $Q_INT" 2 "trn1.32xlarge only"
+      else
+        check "${q%%:*} Trn vCPU quota = $Q_INT" 2 "may not fit a trn1/trn2 .32xl/.48xl node"
+      fi
+    done
+  else
+    echo "  INFO  Trn vCPU quota checks skipped (no trn* Neuron nodes; Inferentia uses the Inf quotas)"
+  fi
+
+  if kubectl get ds neuron-monitor -n kube-system >/dev/null 2>&1; then
+    echo "  INFO  ds/neuron-monitor present"
+  else
+    echo "  INFO  ds/neuron-monitor absent (install_neuron_monitor = false)"
+  fi
+fi
+
 echo
 echo "═══════════════════════════════════════════════════════════════════"
 echo "Result: PASS=$PASS  WARN=$WARN  FAIL=$FAIL"

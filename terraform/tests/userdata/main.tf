@@ -28,6 +28,13 @@ variable "enable_local_lvm" {
   default = true
 }
 
+# nvidia | neuron — mirrors eks-gpu-nodegroup's per-NG vendor (detected from
+# gpu_type by modules/gpu-instance-catalog).
+variable "accelerator_vendor" {
+  type    = string
+  default = "nvidia"
+}
+
 # Shared GPU bootstrap fragments (same module the GPU nodegroup + Karpenter
 # GPU NodePools use).
 module "catalog" {
@@ -59,12 +66,19 @@ locals {
     local_lvm_stripe_kb            = "256"
     install_efa_userspace          = var.install_efa_userspace
     efa_userspace_snippet          = module.catalog.efa_userspace_snippet
-    nvidia_open_kmod_fixup_snippet = module.catalog.nvidia_open_kmod_fixup_snippet
+    accelerator_vendor             = var.accelerator_vendor
+    nvidia_open_kmod_fixup_snippet = var.accelerator_vendor == "nvidia" ? module.catalog.nvidia_open_kmod_fixup_snippet : ""
     ebs_data_disk_detect_snippet   = "detect_ebs_data_disk() { echo /dev/xvdb; }"
     node_management                = var.node_management
-    extra_node_labels              = var.node_management == "self_managed" ? "workload-type=gpu,gpu-instance-type=p5.48xlarge,purchase-option=od" : ""
-    node_taints                    = var.node_management == "self_managed" ? "nvidia.com/gpu=true:NoSchedule" : ""
-    containerd_storage             = var.containerd_storage
+    extra_node_labels = var.node_management == "self_managed" ? (
+      var.accelerator_vendor == "neuron"
+      ? "workload-type=neuron,gpu-instance-type=trn2.48xlarge,purchase-option=od"
+      : "workload-type=gpu,gpu-instance-type=p5.48xlarge,purchase-option=od"
+    ) : ""
+    node_taints = var.node_management == "self_managed" ? (
+      var.accelerator_vendor == "neuron" ? "aws.amazon.com/neuron=true:NoSchedule" : "nvidia.com/gpu=true:NoSchedule"
+    ) : ""
+    containerd_storage = var.containerd_storage
   })
 
   # The body of the cloud-boothook part only — i.e. everything BEFORE the
@@ -274,4 +288,17 @@ output "gpu_mask_containerd_count" {
 }
 output "gpu_rsync_migration_count" {
   value = length(regexall("rsync[[:space:]]+-aHAX", local.gpu_boothook))
+}
+
+# Accelerator vendor (NVIDIA vs Neuron). The NVIDIA containerd runtime overlay
+# (runtimes.nvidia SystemdCgroup) and the g7 open-kmod fixup must render only
+# for NVIDIA nodes; Neuron nodes use the AMI's default runc config.
+output "gpu_nodeconfig_has_containerd" {
+  value = can(yamldecode(local.gpu_nodeconfig_yaml).spec.containerd)
+}
+output "gpu_has_nvidia_runtime_overlay" {
+  value = strcontains(local.gpu_userdata, "runtimes.nvidia")
+}
+output "gpu_has_kmod_fixup" {
+  value = strcontains(local.gpu_boothook, "10de:2c3a")
 }

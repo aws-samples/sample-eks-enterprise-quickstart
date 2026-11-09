@@ -19,7 +19,15 @@ on v20260509-v20260512 with containerd 2.2.3 + toolkit 1.19; cgroupsPath
 crash on the same window before nodeadm #2705 landed). Verified working
 combinations should be recorded in docs/AMI_VERSIONS.md.
 
-Ignored when gpu_custom_ami_id is set.
+Ignored for NVIDIA nodegroups when gpu_custom_ami_id is set.
+
+Applies to NVIDIA nodegroups; trn*/inf* nodegroups use
+neuron_ami_release_version / neuron_custom_ami_id, but INHERIT this value
+when neuron_ami_release_version is null (the default) and
+neuron_custom_ami_id is empty — even when gpu_custom_ami_id is set. Set
+neuron_ami_release_version ("" = SSM recommended, or a tag) to decouple;
+otherwise a tag not published for the Neuron AMI fails the plan
+(ParameterNotFound).
 EOT
   default     = ""
 }
@@ -49,7 +57,12 @@ nodegroup on the default AMI. Without a 595 AMI the node userdata applies
 an allowlist fixup so g7 still comes up on 580 (works empirically, not
 AWS-supported); see templates/userdata.sh.tpl.
 
-When set, gpu_ami_release_version is ignored.
+When set, gpu_ami_release_version is ignored for NVIDIA nodegroups only
+(trn*/inf* nodegroups still inherit it via neuron_ami_release_version =
+null).
+
+gpu_custom_ami_id itself never applies to trn*/inf* nodegroups; they use
+neuron_custom_ami_id.
 EOT
   default     = ""
 
@@ -59,10 +72,46 @@ EOT
   }
 }
 
+# -------------------------------------------------------------------
+# AWS Neuron (Trainium / Inferentia) AMI selection. Only consulted for
+# gpu_nodegroups entries whose gpu_type is classified as Neuron by
+# modules/gpu-instance-catalog (trn* / inf*). The EKS AL2023 Neuron AMI is
+# published for x86_64 only:
+#   /aws/service/eks/optimized-ami/<k8s>/amazon-linux-2023/x86_64/neuron/recommended/image_id
+#   /aws/service/eks/optimized-ami/<k8s>/amazon-linux-2023/x86_64/neuron/amazon-eks-node-al2023-x86_64-neuron-<k8s>-v<YYYYMMDD>/image_id
+# -------------------------------------------------------------------
+variable "neuron_ami_release_version" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "EKS AL2023 Neuron AMI release tag (vYYYYMMDD) for trn*/inf* nodegroups. null (default) = inherit gpu_ami_release_version (NVIDIA and Neuron AMIs share release tags); \"\" = SSM recommended; ignored when neuron_custom_ami_id is set. x86_64 only."
+
+  validation {
+    condition     = var.neuron_ami_release_version == null || can(regex("^(v[0-9]{8})?$", var.neuron_ami_release_version))
+    error_message = "neuron_ami_release_version must be null, \"\" (recommended) or a release tag like \"v20261031\"."
+  }
+}
+
+variable "neuron_custom_ami_id" {
+  type        = string
+  default     = ""
+  description = "Override the SSM-resolved EKS AL2023 Neuron AMI with a fully-specified AMI ID. MUST derive from amazon-eks-node-al2023-x86_64-neuron-* (aws-neuronx-dkms + EFA minimal + nodeadm). Applies to trn*/inf* nodegroups only. When set, neuron_ami_release_version is ignored."
+
+  validation {
+    condition     = var.neuron_custom_ami_id == "" || can(regex("^ami-[0-9a-f]+$", var.neuron_custom_ami_id))
+    error_message = "neuron_custom_ami_id must be empty or a valid AMI ID matching ^ami-[0-9a-f]+$."
+  }
+}
+
 variable "private_subnet_ids" {
   type = list(string)
 }
 
+# gpu_type accepts NVIDIA (p*/g*) or AWS Neuron (trn*/inf*) instance types; the
+# accelerator vendor is detected from the name (modules/gpu-instance-catalog
+# neuron_instance_type_regex) and drives the per-nodegroup AMI, labels
+# (workload-type=gpu|neuron), taint (nvidia.com/gpu | aws.amazon.com/neuron)
+# and Cluster Autoscaler resource hints. NVIDIA and Neuron entries may coexist.
 variable "gpu_nodegroups" {
   type = list(object({
     gpu_type                = string

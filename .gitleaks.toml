@@ -37,7 +37,8 @@ paths = [
 #   Remaining per-region EKS add-on ECR accounts (opt-in regions, GovCloud,
 #   cn-north-1, eusc) — published in
 #   https://docs.aws.amazon.com/eks/latest/userguide/add-ons-images.html and
-#   mirrored in modules/eks-gpu-stack/main.tf eks_addon_ecr_account_by_region.
+#   mirrored in modules/eks-addon-ecr-registry/main.tf eks_addon_ecr_account_by_region
+#   (shared by eks-gpu-stack and eks-neuron-stack).
 #   Listed individually (no \d{12} wildcard) so the private-ID block rule
 #   below can't be masked.
 #   123456789012 — AWS documentation placeholder account ID, used in

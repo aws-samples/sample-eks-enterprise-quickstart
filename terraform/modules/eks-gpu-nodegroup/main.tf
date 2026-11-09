@@ -11,6 +11,15 @@ data "aws_caller_identity" "current" {}
 module "catalog" {
   source                = "../gpu-instance-catalog"
   efa_installer_version = var.efa_installer_version
+  # Classify every declared gpu_type as nvidia | neuron (name-based, see
+  # vendor_by_instance_type in the catalog).
+  instance_types = [for ng in var.gpu_nodegroups : ng.gpu_type]
+  # Per-type EC2 architectures -> nvidia_ami_arches / neuron_types_without_x86_64
+  # (the per-vendor arch reduction lives in the catalog so it can be tested
+  # with literal maps; see tests/gpu_instance_catalog).
+  supported_architectures_by_instance_type = {
+    for t, it in data.aws_ec2_instance_type.gpu : t => it.supported_architectures
+  }
 }
 
 locals {
@@ -43,7 +52,32 @@ locals {
 }
 
 # ===================================================================
-# Architecture detection (all GPU types in a single deploy must share arch)
+# Accelerator vendor per nodegroup (nvidia | neuron)
+#
+# Classification is STATIC — derived from the gpu_type string by the
+# catalog's constant regex (trn*/inf* => neuron, everything else => nvidia),
+# NOT from data.aws_ec2_instance_type. The root module instantiates this
+# module with depends_on = [module.eks_addons], which defers data-source reads
+# to apply time on a fresh plan; anything keyed off the data source (labels,
+# taints, ASG tag keys, data-source counts) would turn into "known after
+# apply". The name-based answer is cross-checked against the data source's
+# gpus / neuron_devices in preconditions on aws_launch_template.gpu.
+#
+# For a pre-Neuron (NVIDIA-only) config every entry resolves to "nvidia" and
+# every vendor-dependent expression below evaluates to the exact literal it
+# replaced — zero diff on existing deployments.
+# ===================================================================
+locals {
+  type_vendor = module.catalog.vendor_by_instance_type
+  ng_vendor   = { for k, ng in local.nodegroups_map : k => local.type_vendor[ng.gpu_type] }
+  ng_profile  = { for k, v in local.ng_vendor : k => module.catalog.accelerator_profiles[v] }
+  has_nvidia  = contains(values(local.ng_vendor), "nvidia")
+  has_neuron  = contains(values(local.ng_vendor), "neuron")
+}
+
+# ===================================================================
+# Architecture detection (all NVIDIA GPU types in a single deploy must share
+# arch; Neuron types are always x86_64 and resolve their own AMI)
 # ===================================================================
 data "aws_ec2_instance_type" "gpu" {
   for_each      = toset([for ng in var.gpu_nodegroups : ng.gpu_type])
@@ -51,21 +85,30 @@ data "aws_ec2_instance_type" "gpu" {
 }
 
 locals {
-  # Architecture of the first declared GPU type — used for AMI lookup.
-  # All declared GPU types must agree (validated below).
-  gpu_arches = distinct([
-    for it in data.aws_ec2_instance_type.gpu :
-    contains(it.supported_architectures, "arm64") ? "arm64" : "x86_64"
-  ])
+  # Architecture of the first declared NVIDIA GPU type — used for the NVIDIA
+  # AMI lookup. All declared NVIDIA GPU types must agree (validated below).
+  # Neuron types are filtered out: the Neuron AMI is x86_64-only and is
+  # resolved separately (data.aws_ssm_parameter.neuron_ami), so a Neuron
+  # nodegroup never influences the NVIDIA AMI arch.
+  # Same value as the pre-Neuron inline expression for an NVIDIA-only config
+  # (identical arm64 ternary, same key order); Neuron types are filtered out
+  # inside the catalog helper.
+  gpu_arches = module.catalog.nvidia_ami_arches
 
   gpu_arch = length(local.gpu_arches) > 0 ? local.gpu_arches[0] : "x86_64"
 }
 
+# Name kept as-is (pre-Neuron) for state continuity; it now also guards the
+# Neuron x86_64-only constraint.
 resource "null_resource" "validate_arch_uniform" {
   lifecycle {
     precondition {
       condition     = length(local.gpu_arches) <= 1
-      error_message = "gpu_nodegroups mixes architectures (${join(", ", local.gpu_arches)}). Split into separate apply runs with homogeneous gpu_type."
+      error_message = "NVIDIA gpu_nodegroups mix architectures (${join(", ", local.gpu_arches)}). Split into separate apply runs with homogeneous NVIDIA gpu_type (Neuron nodegroups are always x86_64 and may coexist)."
+    }
+    precondition {
+      condition     = length(module.catalog.neuron_types_without_x86_64) == 0
+      error_message = "Neuron (trn*/inf*) types must be x86_64 — AWS publishes no arm64 EKS Neuron AMI (offending: ${join(", ", module.catalog.neuron_types_without_x86_64)})."
     }
   }
 }
@@ -89,8 +132,44 @@ data "aws_ssm_parameter" "gpu_ami" {
   # otherwise we'd fail apply if the SSM path doesn't exist (e.g. running
   # on a k8s_version that AWS hasn't published a recommended NVIDIA AMI
   # for yet, but the operator has baked their own).
-  count = var.gpu_custom_ami_id != "" ? 0 : 1
+  # Also skipped when there is no NVIDIA nodegroup at all (Neuron-only
+  # deploy) — has_nvidia is static, so NVIDIA-only configs keep count = 1.
+  count = var.gpu_custom_ami_id != "" || !local.has_nvidia ? 0 : 1
   name  = local.gpu_ami_ssm_path
+}
+
+# AWS Neuron (trn*/inf*) AMI — x86_64 only. Same SSM layout as NVIDIA:
+#   /aws/service/eks/optimized-ami/<k8s>/amazon-linux-2023/x86_64/neuron/recommended/image_id
+#   /aws/service/eks/optimized-ami/<k8s>/amazon-linux-2023/x86_64/neuron/amazon-eks-node-al2023-x86_64-neuron-<k8s>-v<YYYYMMDD>/image_id
+# neuron_ami_release_version = null inherits gpu_ami_release_version (AWS
+# publishes NVIDIA and Neuron AMIs under the same release tags); if a pinned
+# tag was not published for the Neuron variant, plan fails with
+# ParameterNotFound — set neuron_ami_release_version explicitly.
+locals {
+  neuron_ami_release = var.neuron_ami_release_version != null ? var.neuron_ami_release_version : var.gpu_ami_release_version
+  neuron_ami_ssm_path = (
+    local.neuron_ami_release == "" ?
+    "/aws/service/eks/optimized-ami/${var.k8s_version}/amazon-linux-2023/x86_64/neuron/recommended/image_id" :
+    "/aws/service/eks/optimized-ami/${var.k8s_version}/amazon-linux-2023/x86_64/neuron/amazon-eks-node-al2023-x86_64-neuron-${var.k8s_version}-${local.neuron_ami_release}/image_id"
+  )
+}
+
+data "aws_ssm_parameter" "neuron_ami" {
+  # Separate block (not for_each per vendor) so the NVIDIA lookup keeps its
+  # pre-Neuron address (gpu_ami[0]) and tests can override this one alone.
+  count = var.neuron_custom_ami_id == "" && local.has_neuron ? 1 : 0
+  name  = local.neuron_ami_ssm_path
+}
+
+locals {
+  # Per-NG AMI. The NVIDIA branch is the pre-Neuron LT expression verbatim.
+  ng_ami_id = {
+    for k, v in local.ng_vendor : k => (
+      v == "neuron"
+      ? (var.neuron_custom_ami_id != "" ? var.neuron_custom_ami_id : data.aws_ssm_parameter.neuron_ami[0].value)
+      : (var.gpu_custom_ami_id != "" ? var.gpu_custom_ami_id : data.aws_ssm_parameter.gpu_ami[0].value)
+    )
+  }
 }
 
 # ===================================================================
@@ -218,6 +297,26 @@ resource "aws_placement_group" "gpu" {
   }
 }
 
+# Warn-only counterpart of the Neuron-scoped LT precondition (see
+# aws_launch_template.gpu), NVIDIA entries only (Neuron entries already fail
+# hard there): an NVIDIA cb entry that gets a cluster placement
+# group can never launch (EC2 Capacity Blocks reject placement groups), but it
+# could be planned/applied before Neuron support, so it is reported as a plan
+# WARNING instead of an error — an unchanged NVIDIA tfvars keeps planning with
+# no diff. Fixing it (placement_group = "none") is an intentional change: it
+# destroys aws_placement_group.gpu[<key>] and creates a new Launch Template
+# version without the placement block (managed NG rolls / ASG picks it up).
+check "cb_nodegroups_without_placement_group" {
+  assert {
+    condition = alltrue([
+      for k, ng in local.nodegroups_map :
+      ng.purchase_option != "cb" || !contains(keys(local.pg_eligible), k)
+      if local.ng_vendor[k] == "nvidia"
+    ])
+    error_message = "NVIDIA gpu_nodegroups entries ${join(", ", [for k, ng in local.nodegroups_map : k if local.ng_vendor[k] == "nvidia" && ng.purchase_option == "cb" && contains(keys(local.pg_eligible), k)])}: purchase_option = \"cb\" with placement_group = \"cluster\" and a single subnet — EC2 Capacity Blocks do not support placement groups, so these nodegroups can never launch instances. Set placement_group = \"none\" (destroys the unused placement group and creates a new Launch Template version without the placement block)."
+  }
+}
+
 # ===================================================================
 # Per-NG userdata
 #
@@ -227,7 +326,9 @@ resource "aws_placement_group" "gpu" {
 # NG-specific identifiers (workload-type, gpu-instance-type,
 # purchase-option, plus suffix/odcr-id when set), plus
 # --register-with-taints=nvidia.com/gpu=true:NoSchedule (also injected
-# by EKS in managed mode).
+# by EKS in managed mode). Neuron nodegroups use workload-type=neuron and
+# aws.amazon.com/neuron=true:NoSchedule instead (per-vendor profile from
+# modules/gpu-instance-catalog).
 # ===================================================================
 locals {
   # Per-NG capacity_reservation_id, normalised: optional+null in the
@@ -244,7 +345,7 @@ locals {
   # Comma-separated for kubelet --node-labels.
   ng_extra_node_labels = {
     for k, ng in local.nodegroups_map : k => join(",", compact([
-      "workload-type=gpu",
+      "workload-type=${local.ng_profile[k].workload_type}",
       "gpu-instance-type=${ng.gpu_type}",
       "purchase-option=${ng.purchase_option}",
       ng.suffix != "" ? "ng-suffix=${trimprefix(ng.suffix, "-")}" : "",
@@ -256,7 +357,7 @@ locals {
   # uses aws_eks_node_group.taint which EKS API injects). Format matches
   # kubelet --register-with-taints.
   ng_node_taints = {
-    for k, ng in local.nodegroups_map : k => "nvidia.com/gpu=true:NoSchedule"
+    for k, ng in local.nodegroups_map : k => "${local.ng_profile[k].taint.key}=${local.ng_profile[k].taint.value}:${local.ng_profile[k].taint.effect}"
   }
 
   # Per-NG /var/lib/containerd backing store (issue #12):
@@ -273,6 +374,9 @@ locals {
   }
 
   userdata = {
+    # accelerator_vendor gates the NVIDIA-only NodeConfig containerd runtime
+    # overlay in the template; the g7 NVIDIA open-kmod allowlist fixup is
+    # likewise rendered for NVIDIA nodegroups only (meaningless on Neuron).
     for k, ng in local.nodegroups_map : k => templatefile("${path.module}/templates/userdata.sh.tpl", {
       cluster_name                   = var.cluster_name
       cluster_endpoint               = var.cluster_endpoint
@@ -286,7 +390,8 @@ locals {
       local_lvm_stripe_kb            = var.local_lvm_stripe_kb
       install_efa_userspace          = var.install_efa_userspace
       efa_userspace_snippet          = module.catalog.efa_userspace_snippet
-      nvidia_open_kmod_fixup_snippet = module.catalog.nvidia_open_kmod_fixup_snippet
+      accelerator_vendor             = local.ng_vendor[k]
+      nvidia_open_kmod_fixup_snippet = local.ng_vendor[k] == "nvidia" ? module.catalog.nvidia_open_kmod_fixup_snippet : ""
       ebs_data_disk_detect_snippet   = file("${path.module}/templates/detect-ebs-disk.sh")
       node_management                = var.node_management
       extra_node_labels              = local.ng_extra_node_labels[k]
@@ -308,9 +413,11 @@ resource "aws_launch_template" "gpu" {
   name        = "${var.cluster_name}-gpu-${each.key}-lt"
   description = "GPU LT (${each.value.gpu_type}, ${each.value.purchase_option})"
 
-  # gpu_custom_ami_id (when set) bypasses SSM lookup entirely — for
-  # operator-baked AMIs derived from the EKS-NVIDIA base.
-  image_id  = var.gpu_custom_ami_id != "" ? var.gpu_custom_ami_id : data.aws_ssm_parameter.gpu_ami[0].value
+  # Per-vendor AMI (local.ng_ami_id); the NVIDIA branch is the pre-Neuron
+  # expression. gpu_custom_ami_id / neuron_custom_ami_id (when set) bypass
+  # the SSM lookup entirely — for operator-baked AMIs derived from the
+  # EKS-NVIDIA / EKS-Neuron base.
+  image_id  = local.ng_ami_id[each.key]
   user_data = base64encode(local.userdata[each.key])
   key_name  = var.ec2_key_name != "" ? var.ec2_key_name : null
 
@@ -465,6 +572,54 @@ resource "aws_launch_template" "gpu" {
       condition     = local.ng_containerd_storage[each.key] != "instance_store" || data.aws_ec2_instance_type.gpu[each.value.gpu_type].instance_storage_supported
       error_message = "gpu_nodegroups entry ${each.key}: containerd_storage = \"instance_store\" but ${each.value.gpu_type} has no Instance Store. Use containerd_storage = \"ebs\" for this nodegroup."
     }
+
+    # EC2 Capacity Blocks do not support placement groups ("You can't specify
+    # a placement group when you launch instances into a Capacity Block" —
+    # ec2-capacity-blocks.html; CB instances are already UltraCluster
+    # co-located). A cb entry that is pg_eligible (placement_group = "cluster"
+    # + single subnet) would plan/apply fine and then fail every RunInstances,
+    # burning prepaid, non-cancellable CB hours. Gated on pg_eligible (not on
+    # placement_group alone) so cb + "cluster" + multiple subnets — which gets
+    # no PG and launches today — keeps planning unchanged.
+    #
+    # Hard failure for Neuron nodegroups ONLY. A trn*/inf* entry COULD exist
+    # before Neuron support (gpu_type was free-form; it rendered with the
+    # NVIDIA AMI / label / taint), but the upgrade already re-renders it as a
+    # Neuron nodegroup (new AMI, label, taint, CA tags -> forced LT change),
+    # and it could never have launched (no Neuron driver, and no CB launch
+    # with a PG) — so failing here breaks no working zero-diff plan (README
+    # upgrade note "Existing trn*/inf* entries in gpu_nodegroups"). An NVIDIA
+    # cb + cluster-PG entry also planned before (e.g. a desired=0 managed NG
+    # waiting for a future-dated CB) but is otherwise unchanged; failing it
+    # here would block every plan of an unchanged NVIDIA tfvars. NVIDIA
+    # entries get the same message as a non-blocking warning from
+    # check.cb_nodegroups_without_placement_group below.
+    precondition {
+      condition     = local.ng_vendor[each.key] != "neuron" || each.value.purchase_option != "cb" || !contains(keys(local.pg_eligible), each.key)
+      error_message = "gpu_nodegroups entry ${each.key}: purchase_option = \"cb\" with placement_group = \"cluster\" — EC2 Capacity Blocks do not support placement groups (CB instances are already co-located in an EC2 UltraCluster). Set placement_group = \"none\" for this nodegroup."
+    }
+
+    # Same custom AMI for NVIDIA and Neuron nodegroups (mirrors the Karpenter
+    # pool guard in modules/eks-karpenter): one of them boots the wrong AMI
+    # (e.g. a trn2 NG on an NVIDIA image has no aws-neuronx-dkms -> joins with
+    # aws.amazon.com/neuron = 0 while CA still believes 16). Plan-time
+    # (variables + static vendor only); NVIDIA-only configs never reach it.
+    precondition {
+      condition     = local.ng_vendor[each.key] != "neuron" || !local.has_nvidia || var.neuron_custom_ami_id == "" || var.neuron_custom_ami_id != var.gpu_custom_ami_id
+      error_message = "gpu_nodegroups entry ${each.key}: neuron_custom_ami_id and gpu_custom_ami_id are the same AMI (${var.neuron_custom_ami_id}) while NVIDIA and Neuron nodegroups coexist. NVIDIA and Neuron nodegroups need different AMIs: point neuron_custom_ami_id at an amazon-eks-node-al2023-x86_64-neuron-* derived AMI (or clear it for the SSM Neuron AMI), or fix gpu_custom_ami_id for the NVIDIA nodegroups."
+    }
+
+    # Cross-check the static, name-based vendor classification against what
+    # EC2 reports. Both checks are one-sided so they pass for any NVIDIA type
+    # (neuron_devices = []) and for any Neuron type that EC2 describes as such.
+    precondition {
+      condition     = local.ng_vendor[each.key] != "neuron" || length(data.aws_ec2_instance_type.gpu[each.value.gpu_type].neuron_devices) > 0
+      error_message = "gpu_nodegroups entry ${each.key}: ${each.value.gpu_type} is classified as Neuron by name (trn*/inf*) but EC2 reports no Neuron devices. Some Neuron types (e.g. trn2u.48xlarge) are described by EC2 without NeuronInfo; they are not supported because the Neuron device/core counts for the Cluster Autoscaler tags cannot be derived — this is not a name misclassification."
+    }
+    precondition {
+      condition     = local.ng_vendor[each.key] != "nvidia" || length(data.aws_ec2_instance_type.gpu[each.value.gpu_type].gpus) > 0 || length(data.aws_ec2_instance_type.gpu[each.value.gpu_type].neuron_devices) == 0
+      error_message = "gpu_nodegroups entry ${each.key}: EC2 reports Neuron devices for ${each.value.gpu_type} but its name does not match the catalog's neuron_instance_type_regex — extend the regex in modules/gpu-instance-catalog."
+    }
   }
 }
 
@@ -501,14 +656,18 @@ resource "aws_eks_node_group" "gpu" {
     version = aws_launch_template.gpu[each.key].latest_version
   }
 
+  # workload-type / taint key come from the per-vendor profile: "gpu" +
+  # nvidia.com/gpu for NVIDIA (pre-Neuron literals), "neuron" +
+  # aws.amazon.com/neuron for Trainium/Inferentia — so NVIDIA DaemonSets
+  # (which select workload-type=gpu) never land on Neuron nodes.
   labels = {
-    workload-type     = "gpu"
+    workload-type     = local.ng_profile[each.key].workload_type
     gpu-instance-type = each.value.gpu_type
     purchase-option   = each.value.purchase_option
   }
 
   taint {
-    key    = "nvidia.com/gpu"
+    key    = local.ng_profile[each.key].taint.key
     value  = "true"
     effect = "NO_SCHEDULE"
   }
@@ -543,23 +702,62 @@ resource "aws_eks_node_group" "gpu" {
 # ===================================================================
 locals {
   gpu_ng_asg_tags = var.node_management == "managed" ? merge([
-    for k, ng in aws_eks_node_group.gpu : {
-      "${k}-enabled" = {
-        asg_name = ng.resources[0].autoscaling_groups[0].name
-        key      = "k8s.io/cluster-autoscaler/enabled"
-        value    = "true"
-      }
-      "${k}-owned" = {
-        asg_name = ng.resources[0].autoscaling_groups[0].name
-        key      = "k8s.io/cluster-autoscaler/${var.cluster_name}"
-        value    = "owned"
-      }
-      "${k}-instance-type" = {
-        asg_name = ng.resources[0].autoscaling_groups[0].name
-        key      = "k8s.io/cluster-autoscaler/node-template/label/gpu-instance-type"
-        value    = ng.labels.gpu-instance-type
-      }
-    }
+    for k, ng in aws_eks_node_group.gpu : merge(
+      {
+        "${k}-enabled" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/enabled"
+          value    = "true"
+        }
+        "${k}-owned" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/${var.cluster_name}"
+          value    = "owned"
+        }
+        "${k}-instance-type" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/label/gpu-instance-type"
+          value    = ng.labels.gpu-instance-type
+        }
+      },
+      # Neuron-only scale-from-zero hints. NVIDIA managed nodegroups get none
+      # of these: (a) adding them would be a diff on every existing NVIDIA
+      # deployment, and (b) CA's static AWS instance-type table already knows
+      # nvidia.com/gpu counts, and the managed NG labels/taints are read back
+      # from DescribeNodegroup. CA has no built-in knowledge of
+      # aws.amazon.com/neuron / neuroncore / vpc.amazonaws.com/efa, so Neuron
+      # nodegroups advertise them explicitly. The keys depend only on the
+      # static vendor + catalog EFA layout, so for_each stays plan-time known.
+      local.ng_vendor[k] == "neuron" ? {
+        "${k}-workload-label" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/label/workload-type"
+          value    = "neuron"
+        }
+        "${k}-neuron-taint" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/taint/aws.amazon.com/neuron"
+          value    = "true:NoSchedule"
+        }
+        "${k}-neuron-resource" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/resources/aws.amazon.com/neuron"
+          value    = tostring(local.ng_neuron_count[k])
+        }
+        "${k}-neuroncore-resource" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/resources/aws.amazon.com/neuroncore"
+          value    = tostring(local.ng_neuroncore_count[k])
+        }
+      } : {},
+      local.ng_vendor[k] == "neuron" && local.ng_efa_count[k] > 0 ? {
+        "${k}-efa-resource" = {
+          asg_name = ng.resources[0].autoscaling_groups[0].name
+          key      = "k8s.io/cluster-autoscaler/node-template/resources/vpc.amazonaws.com/efa"
+          value    = tostring(local.ng_efa_count[k])
+        }
+      } : {},
+    )
   ]...) : {}
 }
 
@@ -601,7 +799,7 @@ locals {
       },
       # scale-from-zero label hints
       {
-        "k8s.io/cluster-autoscaler/node-template/label/workload-type"     = "gpu"
+        "k8s.io/cluster-autoscaler/node-template/label/workload-type"     = local.ng_profile[k].workload_type
         "k8s.io/cluster-autoscaler/node-template/label/gpu-instance-type" = ng.gpu_type
         "k8s.io/cluster-autoscaler/node-template/label/purchase-option"   = ng.purchase_option
       },
@@ -617,12 +815,20 @@ locals {
       } : {},
       # Taint hint — CA needs this to evaluate scale-from-zero correctly
       {
-        "k8s.io/cluster-autoscaler/node-template/taint/nvidia.com/gpu" = "true:NoSchedule"
+        "k8s.io/cluster-autoscaler/node-template/taint/${local.ng_profile[k].taint.key}" = "true:NoSchedule"
       },
-      # Resource hints — let CA reason about pod fit before launch
+      # Resource hints — let CA reason about pod fit before launch.
+      # NVIDIA: nvidia.com/gpu; Neuron: aws.amazon.com/neuron (devices) +
+      # aws.amazon.com/neuroncore (LNC-aware lower bound, see
+      # ng_neuroncore_count).
+      local.ng_vendor[k] == "neuron" ? {
+        "k8s.io/cluster-autoscaler/node-template/resources/aws.amazon.com/neuron"     = tostring(local.ng_neuron_count[k])
+        "k8s.io/cluster-autoscaler/node-template/resources/aws.amazon.com/neuroncore" = tostring(local.ng_neuroncore_count[k])
+        } : {
+        "k8s.io/cluster-autoscaler/node-template/resources/nvidia.com/gpu" = tostring(local.ng_gpu_count[k])
+      },
       {
-        "k8s.io/cluster-autoscaler/node-template/resources/nvidia.com/gpu"        = tostring(local.ng_gpu_count[k])
-        "k8s.io/cluster-autoscaler/node-template/resources/vpc.amazonaws.com/efa" = tostring(local.ng_layout[k].efa_only_count + (local.ng_layout[k].primary_efa ? 1 : 0))
+        "k8s.io/cluster-autoscaler/node-template/resources/vpc.amazonaws.com/efa" = tostring(local.ng_efa_count[k])
       },
       # Always-on instance/cluster tags (mirroring tag_specifications on LT)
       {
@@ -647,6 +853,39 @@ locals {
       ? sum([for g in data.aws_ec2_instance_type.gpu[ng.gpu_type].gpus : g.count])
       : 0
     )
+  }
+
+  # Neuron device count per nodegroup (aws.amazon.com/neuron). neuron_devices
+  # is also a SET (same caveat as gpus above).
+  ng_neuron_count = {
+    for k, ng in local.nodegroups_map :
+    k => (
+      length(data.aws_ec2_instance_type.gpu[ng.gpu_type].neuron_devices) > 0
+      ? sum([for d in data.aws_ec2_instance_type.gpu[ng.gpu_type].neuron_devices : d.count])
+      : 0
+    )
+  }
+
+  # NeuronCores per nodegroup (aws.amazon.com/neuroncore) — LNC-aware lower
+  # bound: NeuronCore v3+ (trn2/trn3) default to Logical NeuronCore Config
+  # LNC=2, so the device plugin advertises physical/2 (trn2.48xlarge = 64);
+  # v1/v2 (inf1/inf2/trn1) advertise physical cores (trn1.32xlarge = 32).
+  # Under-advertising can only cause a missed scale-up from zero, never a
+  # node that launches and can't fit the pod. Prefer requesting
+  # aws.amazon.com/neuron (whole devices) in workloads.
+  ng_neuroncore_count = {
+    for k, ng in local.nodegroups_map :
+    k => (
+      length(data.aws_ec2_instance_type.gpu[ng.gpu_type].neuron_devices) > 0
+      ? sum([for d in data.aws_ec2_instance_type.gpu[ng.gpu_type].neuron_devices : d.count * floor(d.core_count / (d.core_version >= 3 ? 2 : 1))])
+      : 0
+    )
+  }
+
+  # EFA interfaces per nodegroup (vpc.amazonaws.com/efa) — from the static
+  # catalog layout.
+  ng_efa_count = {
+    for k, l in local.ng_layout : k => l.efa_only_count + (l.primary_efa ? 1 : 0)
   }
 }
 

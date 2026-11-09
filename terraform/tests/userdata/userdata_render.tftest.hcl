@@ -287,3 +287,66 @@ run "gpu_containerd_instance_store" {
     error_message = "instance_store must keep the guarded containerd reload and the EFA userspace install."
   }
 }
+
+# AWS Neuron (Trainium / Inferentia) render: same AL2023 bootstrap contract
+# (one standalone NodeConfig part, no manual nodeadm init, guarded containerd
+# restart, EFA userspace install) but WITHOUT the NVIDIA containerd runtime
+# overlay and the g7 open-kmod fixup.
+run "neuron_render" {
+  command = plan
+
+  variables {
+    node_management    = "self_managed"
+    accelerator_vendor = "neuron"
+  }
+
+  assert {
+    condition     = output.gpu_nodeconfig_part_count == 1
+    error_message = "Neuron user-data must contain exactly one standalone 'application/node.eks.aws' MIME part."
+  }
+  assert {
+    condition     = output.gpu_manual_nodeadm_init_count == 0
+    error_message = "Neuron boothook must NOT call `nodeadm init` manually."
+  }
+  assert {
+    condition     = !output.gpu_nodeconfig_has_containerd
+    error_message = "Neuron NodeConfig must not carry a spec.containerd overlay (it only holds the NVIDIA runtime SystemdCgroup pin)."
+  }
+  assert {
+    condition     = !output.gpu_has_nvidia_runtime_overlay
+    error_message = "Neuron user-data must not mention the NVIDIA containerd runtime."
+  }
+  assert {
+    condition     = !output.gpu_has_kmod_fixup
+    error_message = "Neuron boothook must not carry the NVIDIA g7 open-kmod fixup."
+  }
+  assert {
+    condition     = strcontains(output.gpu_userdata, "--register-with-taints=aws.amazon.com/neuron=true:NoSchedule")
+    error_message = "self_managed Neuron NodeConfig must register the aws.amazon.com/neuron taint."
+  }
+  assert {
+    condition     = strcontains(output.gpu_userdata, "--node-labels=workload-type=neuron,")
+    error_message = "self_managed Neuron NodeConfig must label workload-type=neuron."
+  }
+  assert {
+    condition     = output.gpu_guarded_restart_count == 0
+    error_message = "Neuron boothook must NOT (re)start containerd/kubelet: nodeadm-run starts them after localStorage (live trn2 regression)."
+  }
+  assert {
+    condition     = output.gpu_efa_installer_invocation_count == 1
+    error_message = "Neuron boothook must keep exactly one EFA userspace installer invocation."
+  }
+}
+
+run "nvidia_render_keeps_overlay" {
+  command = plan
+
+  assert {
+    condition     = output.gpu_nodeconfig_has_containerd
+    error_message = "NVIDIA NodeConfig must keep the spec.containerd runtime overlay."
+  }
+  assert {
+    condition     = output.gpu_has_kmod_fixup
+    error_message = "NVIDIA boothook must keep the g7 open-kmod fixup."
+  }
+}
