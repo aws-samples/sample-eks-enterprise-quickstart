@@ -6,6 +6,33 @@ data "aws_vpc" "main" {
   id = var.vpc_id
 }
 
+# Effective Kubernetes / Karpenter versions (read-only EKS lookup). No
+# depends_on and no other module's outputs as inputs, so the versions stay
+# known at plan time.
+module "k8s_version" {
+  source = "./modules/k8s-version"
+
+  cluster_name      = var.cluster_name
+  k8s_version       = var.k8s_version
+  karpenter_version = var.karpenter_version
+  install_karpenter = var.install_karpenter
+}
+
+# Advisory only (warnings; the plan still succeeds).
+check "k8s_version_behind_default" {
+  assert {
+    condition     = module.k8s_version.warnings.k8s_version_behind_default.ok
+    error_message = module.k8s_version.warnings.k8s_version_behind_default.message
+  }
+}
+
+check "karpenter_version_compatible" {
+  assert {
+    condition     = module.k8s_version.warnings.karpenter_version_compatible.ok
+    error_message = module.k8s_version.warnings.karpenter_version_compatible.message
+  }
+}
+
 # =====================================================================
 # VPC Endpoints (replaces 1_enable_vpc_dns.sh + 3_create_vpc_endpoints.sh)
 # =====================================================================
@@ -27,7 +54,7 @@ module "eks_cluster" {
   source = "./modules/eks-cluster"
 
   cluster_name                         = var.cluster_name
-  k8s_version                          = var.k8s_version
+  k8s_version                          = module.k8s_version.k8s_version
   private_subnet_ids                   = var.private_subnet_ids
   public_subnet_ids                    = var.public_subnet_ids
   cluster_mode                         = var.cluster_mode
@@ -50,7 +77,7 @@ module "eks_system_nodegroup" {
   source = "./modules/eks-system-nodegroup"
 
   cluster_name              = module.eks_cluster.cluster_name
-  k8s_version               = var.k8s_version
+  k8s_version               = module.k8s_version.k8s_version
   cluster_endpoint          = module.eks_cluster.cluster_endpoint
   cluster_ca                = module.eks_cluster.cluster_certificate_authority_data
   cluster_security_group_id = module.eks_cluster.cluster_security_group_id
@@ -85,7 +112,7 @@ module "eks_addons" {
   cluster_name                     = module.eks_cluster.cluster_name
   vpc_id                           = var.vpc_id
   region                           = var.aws_region
-  k8s_version                      = var.k8s_version
+  k8s_version                      = module.k8s_version.k8s_version
   install_cluster_autoscaler       = var.install_cluster_autoscaler
   cluster_autoscaler_version       = var.cluster_autoscaler_version
   cluster_autoscaler_chart_version = var.cluster_autoscaler_chart_version
@@ -108,7 +135,7 @@ module "eks_csi_drivers" {
 
   cluster_name            = module.eks_cluster.cluster_name
   region                  = var.aws_region
-  k8s_version             = var.k8s_version
+  k8s_version             = module.k8s_version.k8s_version
   install_efs             = var.install_efs_csi
   install_fsx             = var.install_fsx_csi
   install_s3              = var.install_s3_csi
@@ -132,7 +159,7 @@ module "eks_karpenter" {
   cluster_endpoint          = module.eks_cluster.cluster_endpoint
   cluster_security_group_id = module.eks_cluster.cluster_security_group_id
   region                    = var.aws_region
-  karpenter_version         = var.karpenter_version
+  karpenter_version         = module.k8s_version.karpenter_version
   ssh_public_key            = var.karpenter_ssh_public_key
   helm_replace_existing     = var.helm_replace_existing
   system_node_label_key     = var.system_node_label_key
@@ -188,7 +215,7 @@ module "eks_gpu_nodegroup" {
   service_ipv4_cidr         = module.eks_cluster.service_ipv4_cidr
   vpc_id                    = var.vpc_id
   region                    = var.aws_region
-  k8s_version               = var.k8s_version
+  k8s_version               = module.k8s_version.k8s_version
   gpu_ami_release_version   = var.gpu_ami_release_version
   gpu_custom_ami_id         = var.gpu_custom_ami_id
 

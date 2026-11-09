@@ -28,7 +28,10 @@ public_subnet_ids = [
 # =====================================================================
 cluster_mode               = "private"
 # public_access_cidrs        = ["0.0.0.0/0"]
-k8s_version                = "1.35"
+# k8s_version: omit (null) = keep the running version of an existing cluster
+# with this name, or 1.37 for a new one. Set it to upgrade one minor per
+# apply (README "Kubernetes version and upgrades").
+# k8s_version                = "1.37"
 service_ipv4_cidr          = "172.20.0.0/16"
 # kms_key_arn                = "arn:aws:kms:us-west-2:123456789012:key/xxxx"
 enable_deletion_protection = true
@@ -144,6 +147,7 @@ s3_csi_bucket_arns = []
 # Optional Karpenter
 # =====================================================================
 install_karpenter = false
+# karpenter_version = null  # null = 1.12.1 for <= 1.35, 1.15.1 for 1.36/1.37 (running minor of an existing cluster)
 # karpenter_ssh_public_key = "ssh-rsa AAAA..."
 
 # =====================================================================

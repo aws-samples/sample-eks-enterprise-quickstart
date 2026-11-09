@@ -1,6 +1,32 @@
 data "aws_partition" "current" {}
 data "aws_caller_identity" "current" {}
 
+locals {
+  # Upstream controller permissions (Karpenter cloudformation.yaml) missing
+  # from the policy below: ec2:DescribeInstanceStatus is new in 1.13;
+  # DescribeCapacityReservations / DescribePlacementGroups / placement-group/*
+  # are upstream already for 1.12. All are added ONLY for >= 1.13, so the
+  # policy of existing 1.12.1 installs stays byte-identical. Not added: the
+  # opt-in arc-zonal-shift:GetManagedResource (settings.enableZonalShift,
+  # off) and ec2:RebootInstances (alpha rebootForRepair gate, off).
+  # karpenter_version is passed to Helm as-is, and Helm resolves tag
+  # constraints, so read the first major.minor after any operator prefix:
+  # "1.15", "~1.15", "v1.15.1", ">=1.15.0", "^1.13" -> on; "1.12.1", "~1.12",
+  # ">=1.12" -> off (1.12.x policy byte-identical). Strings without a
+  # major.minor ("^1", "*") may resolve to the newest release -> on. False
+  # positives (e.g. "<1.15") only add read-only permissions. The matrix check
+  # in modules/k8s-version deliberately does not check range constraints.
+  karpenter_semver = try(regex("^[^0-9]*([0-9]+)\\.([0-9]+)", var.karpenter_version), null)
+  karpenter_ge_113 = local.karpenter_semver == null ? true : tonumber(local.karpenter_semver[0]) * 1000 + tonumber(local.karpenter_semver[1]) >= 1013
+
+  karpenter_v113_instance_access_resources = local.karpenter_ge_113 ? ["arn:aws:ec2:${var.region}:*:placement-group/*"] : []
+  karpenter_v113_regional_read = local.karpenter_ge_113 ? [
+    "ec2:DescribeCapacityReservations",
+    "ec2:DescribeInstanceStatus",
+    "ec2:DescribePlacementGroups",
+  ] : []
+}
+
 # =====================================================================
 # Discovery tags on subnets + cluster SG
 # Karpenter EC2NodeClass selects subnets/SGs by these tags.
@@ -92,13 +118,13 @@ resource "aws_iam_role_policy" "karpenter_controller" {
         Sid    = "AllowScopedEC2InstanceAccessActions"
         Effect = "Allow"
         Action = ["ec2:RunInstances", "ec2:CreateFleet"]
-        Resource = [
+        Resource = concat([
           "arn:aws:ec2:${var.region}::image/*",
           "arn:aws:ec2:${var.region}::snapshot/*",
           "arn:aws:ec2:${var.region}:*:security-group/*",
           "arn:aws:ec2:${var.region}:*:subnet/*",
           "arn:aws:ec2:${var.region}:*:capacity-reservation/*",
-        ]
+        ], local.karpenter_v113_instance_access_resources)
       },
       {
         Sid      = "AllowScopedEC2LaunchTemplateAccessActions"
@@ -196,7 +222,7 @@ resource "aws_iam_role_policy" "karpenter_controller" {
       {
         Sid    = "AllowRegionalReadActions"
         Effect = "Allow"
-        Action = [
+        Action = concat([
           "ec2:DescribeAvailabilityZones",
           "ec2:DescribeImages",
           "ec2:DescribeInstances",
@@ -206,7 +232,7 @@ resource "aws_iam_role_policy" "karpenter_controller" {
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSpotPriceHistory",
           "ec2:DescribeSubnets",
-        ]
+        ], local.karpenter_v113_regional_read)
         Resource = "*"
         Condition = {
           StringEquals = { "aws:RequestedRegion" = var.region }

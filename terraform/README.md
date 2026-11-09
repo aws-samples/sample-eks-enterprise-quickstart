@@ -31,7 +31,8 @@ terraform/
     ├── eks-gpu-stack/             # K8s-side GPU stack (standard / NVIDIA Operator)
     ├── eks-neuron-stack/          # K8s-side AWS Neuron stack (device plugin / scheduler / EFA)
     ├── gpu-instance-catalog/      # Shared per-instance-type facts (EFA layout, vendor, boot snippets)
-    └── eks-addon-ecr-registry/    # Shared region -> EKS add-on ECR registry map (EFA plugin image)
+    ├── eks-addon-ecr-registry/    # Shared region -> EKS add-on ECR registry map (EFA plugin image)
+    └── k8s-version/               # Read-only: effective Kubernetes / Karpenter version + upgrade guards
 ```
 
 ## Three-stack layout for private-cluster deploys
@@ -244,6 +245,98 @@ graph edges, but logically:
 7. `eks-gpu-nodegroup` (optional; AWS-side: IAM/SG/LT with multi-NIC EFA + EKS Managed NodeGroup)
 8. `eks-gpu-stack` (optional; K8s-side: device-plugin / EFA / monitoring **or** GPU Operator)
 9. `eks-neuron-stack` (optional; K8s-side AWS Neuron device plugin + EFA for Trainium/Inferentia nodes, plus the opt-in neuron-monitor exporter; independent of `eks-gpu-stack`). With `neuron_monitor_service_monitor = true` the Prometheus Operator CRDs (`monitoring.coreos.com/v1`) must already be installed — Terraform does not order against them, and the apply fails with `no matches for kind "ServiceMonitor"` otherwise.
+
+## Kubernetes version and upgrades
+
+`k8s_version` defaults to `null`:
+
+- **New cluster** → Kubernetes **1.37** (Karpenter default **1.15.1**).
+- **Existing cluster** (same `cluster_name`, found with a read-only
+  `eks:ListClusters` + `eks:DescribeCluster` at plan time) → keeps its
+  **running** version. A deployment created with the old 1.35 default plans
+  with no changes, and the Karpenter default stays **1.12.1**.
+- **Explicit** `k8s_version` → used as-is, but on an existing cluster it may
+  only stay on the running minor or go **one** minor up. A downgrade or a
+  skipped minor fails at plan time.
+
+`karpenter_version = null` resolves to 1.12.1 when the cluster runs (or a new
+cluster is created on) Kubernetes ≤ 1.35, and to 1.15.1 for 1.36 / 1.37.
+For an existing cluster it follows the **running** version, so raising
+`k8s_version` never moves Karpenter in the same apply. The plan fails when
+Karpenter is older than its
+[compatibility matrix](https://karpenter.sh/docs/upgrading/compatibility/)
+allows for the target Kubernetes version (1.35 ≥ 1.9, 1.36 ≥ 1.13,
+1.37 ≥ 1.15), so 1.36 with Karpenter 1.12.1 is rejected. An unchanged
+deployment running ≤ 1.35 that is already outside the matrix (an old
+`karpenter_version` pin) only gets a warning; on 1.36+ it is an error.
+
+A cluster that was raised to 1.36+ on the previous release with
+`karpenter_version` omitted runs Karpenter 1.12.1, which 1.36 does not
+support. Here the default now resolves to 1.15.1, and Helm will not upgrade
+the CRDs. Before the next `terraform apply`, apply the 1.15.1 CRDs (the
+`helm show crds` command in step 1 below).
+
+From
+Karpenter 1.13 the controller policy also gets `ec2:DescribeInstanceStatus`,
+`ec2:DescribeCapacityReservations`, `ec2:DescribePlacementGroups` and
+`placement-group/*`. The 1.12.1 policy stays as it is.
+
+With `k8s_version` omitted and a running cluster below 1.37, every plan
+prints the warning `k8s_version_behind_default`. Nothing changes. To
+silence it, pin the running version (`k8s_version = "1.35"`).
+
+**Upgrade runbook (existing 1.35 cluster)**. Run `terraform init` (same
+`-backend-config`) once after pulling this change, because it adds the local
+module `modules/k8s-version`. Then do one apply per step:
+
+1. **Karpenter first** (skip without `install_karpenter`). Keep
+   `k8s_version = "1.35"` and set `karpenter_version = "1.15.1"`. The
+   karpenter chart installs CRDs only on its first install (Helm never
+   upgrades them), so apply the 1.15.1 CRDs yourself first. This is the
+   chart's own `crds/` content, the same as the `karpenter-crd` chart:
+
+   ```bash
+   helm show crds oci://public.ecr.aws/karpenter/karpenter --version 1.15.1 \
+     | kubectl apply --server-side --force-conflicts -f -
+   terraform apply
+   ```
+
+   Keep `karpenter_version = "1.15.1"` from then on (pinned, or omitted
+   once the cluster runs 1.36+).
+2. `k8s_version = "1.36"`, then `terraform apply`. Wait until the managed
+   nodegroups (system / GPU) report v1.36 (`kubectl get nodes`) and
+   `aws eks list-insights --cluster-name <name>` is clear. Karpenter CPU
+   nodes stay on 1.35 by design, and so do self-managed nodes
+   (`node_management = "self_managed"`) until you replace them (see Notes).
+3. `k8s_version = "1.37"`, then `terraform apply`.
+
+Notes (not handled by Terraform):
+
+- **Bastion kubectl**: `bootstrap-bastion` installs kubectl for its own
+  `k8s_version` (default 1.35, unchanged). kubectl supports ±1 minor, so
+  for a 1.37 cluster re-apply `bootstrap-bastion` with
+  `-var k8s_version=1.37` (the cluster's minor; this re-creates the
+  instance via `user_data_replace_on_change`), or install a matching
+  kubectl on the existing bastion.
+- **Pinned GPU AMIs**: a pinned `gpu_ami_release_version` (and a
+  `karpenter_gpu_ami_selector` / `al2023@vYYYYMMDD` derived from it) must
+  exist for the new minor. Check this before each step.
+- **Regions without 1.37**: EKS releases new minors in some regions and
+  partitions later (`aws eks describe-cluster-versions`). For a new cluster
+  there, set `k8s_version` explicitly to a minor the region offers.
+- **GPU stack images**: check that the `gpu_operator_version` and the
+  gpu-health-check / device-plugin images you use support the new minor.
+- **Karpenter CPU EC2NodeClasses**: `assets/karpenter/ec2nodeclass-*.yaml`
+  select `...-standard-1.35-*` AMIs, so Karpenter CPU nodes keep kubelet
+  1.35. That is inside the supported kubelet skew for 1.36 / 1.37. Edit
+  the assets if you want them to follow the control plane.
+- **Self-managed nodes** (`node_management = "self_managed"`): the system
+  and GPU ASGs have no instance refresh and their processes are suspended,
+  so steps 2 and 3 only add a launch-template version and running nodes
+  keep their old kubelet (inside the skew for 1.36 / 1.37). Cordon, drain
+  and terminate them yourself before the next minor (`aws autoscaling
+  terminate-instance-in-auto-scaling-group --instance-id <id>
+  --no-should-decrement-desired-capacity`, see `docs/SELF_MANAGED_NG.md`).
 
 ## GPU nodegroups
 

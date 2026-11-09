@@ -287,6 +287,7 @@ Test manifests in `examples/`:
 - **System node labels**: `app=eks-utils` label critical for addon scheduling
 - **Multi-AZ support**: Supports 2-4 availability zones (minimum: A/B, optional: C, D)
 - **Terraform is canonical**: full deployment lives in `terraform/`; legacy bash under `scripts/legacy/` is maintenance-only
+- **Kubernetes version**: `k8s_version = null` (default) = 1.37 for a new cluster, else the running version of the existing one (read-only lookup in `terraform/modules/k8s-version`, which also picks the Karpenter default and fails a downgrade, a skipped minor or an unsupported Karpenter at plan time). When adding a minor, update `modules/k8s-version` (`default_k8s_version`, `latest_karpenter_version` — the default for >= 1.36 and the version every runbook message names — and `karpenter_min`), the CA matrix in `modules/eks-addons` and `tests/k8s_version`. Upgrade runbook (Karpenter first, then one minor per apply): `terraform/README.md` "Kubernetes version and upgrades"
 - **Documentation**: See `terraform/README.md` for the terraform path, `docs/MIGRATION_FROM_BASH.md` for bash↔terraform mapping, `docs/DEPLOYMENT_SOP.md` for the legacy step-by-step (still applicable to bash-deployed clusters), `docs/DESIGN.md` for future features
 - **Bash quirks (when working in `scripts/legacy/`)**:
   - Source `scripts/0_setup_env.sh` first; legacy scripts reference it via `${SCRIPT_DIR}/../0_setup_env.sh`

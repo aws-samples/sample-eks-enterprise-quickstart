@@ -14,3 +14,8 @@ output "gpu_nodepool_vendors" {
   description = "Map gpu_nodepools[].name -> \"nvidia\" | \"neuron\" (name-based via modules/gpu-instance-catalog; known at plan time)."
   value       = local.gpu_pool_vendor
 }
+
+output "karpenter_version" {
+  description = "Karpenter chart version pinned on helm_release.karpenter."
+  value       = helm_release.karpenter.version
+}
